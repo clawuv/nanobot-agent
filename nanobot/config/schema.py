@@ -148,6 +148,15 @@ class ExecToolConfig(Base):
     path_append: str = ""
 
 
+class SubagentConfig(Base):
+    """Background subagent execution limits."""
+
+    enabled: bool = True
+    max_concurrent: int = 3
+    max_per_session: int = 2
+    timeout_seconds: int = 300
+
+
 class MCPServerConfig(Base):
     """MCP server connection configuration (stdio or HTTP)."""
 
@@ -165,6 +174,7 @@ class ToolsConfig(Base):
 
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    subagent: SubagentConfig = Field(default_factory=SubagentConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 

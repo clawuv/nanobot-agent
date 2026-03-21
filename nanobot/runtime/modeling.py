@@ -23,6 +23,40 @@ class ActiveModelRuntime:
     reasoning_effort: str | None
 
 
+_VISION_MODEL_MARKERS = (
+    "gpt-4o",
+    "gpt-4.1",
+    "o4",
+    "claude-3",
+    "claude-sonnet-4",
+    "claude-opus-4",
+    "gemini",
+    "glm-4.5v",
+    "glm-4.6v",
+    "glm-4v",
+    "qwen-vl",
+    "qvq",
+    "vision",
+    "multimodal",
+    "pixtral",
+    "llava",
+)
+
+
+def model_supports_vision(model_name: str | None) -> bool:
+    """Heuristic check for whether a configured model can accept image input."""
+    name = (model_name or "").strip().lower()
+    return any(marker in name for marker in _VISION_MODEL_MARKERS)
+
+
+def find_vision_model_profile(config: Config) -> ModelProfile | None:
+    """Return the first enabled configured model that likely supports vision."""
+    for profile in config.get_model_profiles():
+        if profile.enabled and model_supports_vision(profile.model):
+            return profile
+    return None
+
+
 def resolve_active_model_runtime(config: Config) -> ActiveModelRuntime:
     """Resolve the active model profile plus effective runtime settings."""
     profile = config.get_active_model_profile()

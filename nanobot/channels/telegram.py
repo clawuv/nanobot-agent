@@ -11,7 +11,7 @@ from typing import Any, Literal
 from loguru import logger
 from pydantic import Field
 from telegram import BotCommand, ReplyParameters, Update
-from telegram.error import TimedOut
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.request import HTTPXRequest
 
@@ -296,7 +296,8 @@ class TelegramChannel(BaseChannel):
         # Start polling (this runs until stopped)
         await self._app.updater.start_polling(
             allowed_updates=["message"],
-            drop_pending_updates=True  # Ignore old messages on startup
+            drop_pending_updates=True,  # Ignore old messages on startup
+            error_callback=self._on_polling_error,
         )
 
         # Keep running until stopped
@@ -827,6 +828,18 @@ class TelegramChannel(BaseChannel):
     async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Log polling / handler errors instead of silently swallowing them."""
         logger.error("Telegram error: {}", context.error)
+
+    def _on_polling_error(self, error: Exception) -> None:
+        """Keep transient polling network failures readable in logs."""
+        if isinstance(error, NetworkError):
+            logger.warning(
+                "Telegram polling network error: {}. "
+                "This usually means the local network path to Telegram was interrupted; "
+                "the updater will keep retrying.",
+                error,
+            )
+            return
+        logger.error("Telegram polling error: {}", error)
 
     def _get_extension(
         self,

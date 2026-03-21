@@ -6,6 +6,7 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   images?: string[];
+  attachments?: string[];
   timestamp: string;
   isStreaming?: boolean;
 }
@@ -16,58 +17,120 @@ interface UseChatOptions {
   modelId?: string;
 }
 
+interface LoadedSession {
+  key: string;
+  messages: ChatMessage[];
+  modelId?: string;
+}
+
+interface SessionChatState {
+  messages: ChatMessage[];
+  isLoading: boolean;
+  progress: string;
+}
+
+const emptySessionState = (): SessionChatState => ({
+  messages: [],
+  isLoading: false,
+  progress: "",
+});
+
+const messageSignature = (message: ChatMessage): string =>
+  JSON.stringify({
+    role: message.role,
+      content: message.content,
+      images: message.images || [],
+      attachments: message.attachments || [],
+      timestamp: message.timestamp,
+    });
+
+const mergeLoadedMessages = (loaded: ChatMessage[], local: ChatMessage[]): ChatMessage[] => {
+  if (local.length === 0) return loaded;
+  const seen = new Set(loaded.map(messageSignature));
+  const optimistic = local.filter((message) => !seen.has(messageSignature(message)));
+  return [...loaded, ...optimistic];
+};
+
 export function useChat({
   gatewayUrl = "ws://localhost:18790",
   sessionKey = "desktop:direct",
   modelId,
 }: UseChatOptions = {}) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [progress, setProgress] = useState<string>("");
+  const [sessionStates, setSessionStates] = useState<Record<string, SessionChatState>>({});
   const currentSessionKey = useRef(sessionKey);
   currentSessionKey.current = sessionKey;
   const currentModelId = useRef(modelId);
   currentModelId.current = modelId;
 
+  const updateSessionState = useCallback(
+    (key: string, updater: (state: SessionChatState) => SessionChatState) => {
+      setSessionStates((prev) => {
+        const current = prev[key] || emptySessionState();
+        return {
+          ...prev,
+          [key]: updater(current),
+        };
+      });
+    },
+    []
+  );
+
   const onMessage = useCallback((msg: WSMessage) => {
+    const targetSessionKey = msg.session_key || currentSessionKey.current;
     switch (msg.type) {
       case "progress":
-        setProgress(msg.content);
+        updateSessionState(targetSessionKey, (state) => ({
+          ...state,
+          isLoading: true,
+          progress: msg.content,
+        }));
         break;
 
       case "tool_hint":
-        setProgress(`🔧 ${msg.content}`);
+        updateSessionState(targetSessionKey, (state) => ({
+          ...state,
+          isLoading: true,
+          progress: `🔧 ${msg.content}`,
+        }));
         break;
 
       case "reply":
-        setIsLoading(false);
-        setProgress("");
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `assistant-${Date.now()}`,
-            role: "assistant",
-            content: msg.content,
-            timestamp: new Date().toISOString(),
-          },
-        ]);
+        updateSessionState(targetSessionKey, (state) => ({
+          ...state,
+          isLoading: false,
+          progress: "",
+          messages: [
+            ...state.messages,
+            {
+              id: `assistant-${Date.now()}`,
+              role: "assistant",
+              content: msg.content,
+              images: Array.isArray(msg.images) ? msg.images : [],
+              attachments: Array.isArray(msg.attachments) ? msg.attachments : [],
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        }));
         break;
 
       case "error":
-        setIsLoading(false);
-        setProgress("");
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `error-${Date.now()}`,
-            role: "assistant",
-            content: `⚠️ ${msg.content}`,
-            timestamp: new Date().toISOString(),
-          },
-        ]);
+        updateSessionState(targetSessionKey, (state) => ({
+          ...state,
+          isLoading: false,
+          progress: "",
+          messages: [
+            ...state.messages,
+            {
+              id: `error-${Date.now()}`,
+              role: "assistant",
+              content: `⚠️ ${msg.content}`,
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        }));
         break;
     }
-  }, []);
+  }, [updateSessionState]);
 
   const { connected, sendMessage } = useWebSocket({
     url: `${gatewayUrl}/api/chat`,
@@ -75,33 +138,36 @@ export function useChat({
   });
 
   const send = useCallback(
-    (content: string, images: string[] = []) => {
-      if (!content.trim() && images.length === 0) return;
+    (content: string, media: string[] = [], images: string[] = [], attachments: string[] = []) => {
+      if (!content.trim() && media.length === 0) return;
 
       const userMsg: ChatMessage = {
         id: `user-${Date.now()}`,
         role: "user",
         content: content.trim(),
         images,
+        attachments,
         timestamp: new Date().toISOString(),
       };
 
-      setMessages((prev) => [...prev, userMsg]);
-      setIsLoading(true);
-      setProgress("");
-      sendMessage(content.trim(), currentSessionKey.current, images, currentModelId.current);
+      const targetSessionKey = currentSessionKey.current;
+      updateSessionState(targetSessionKey, (state) => ({
+        ...state,
+        messages: [...state.messages, userMsg],
+        isLoading: true,
+        progress: "",
+      }));
+      sendMessage(content.trim(), targetSessionKey, media, currentModelId.current);
     },
-    [sendMessage]
+    [sendMessage, updateSessionState]
   );
 
   const clearMessages = useCallback(() => {
-    setMessages([]);
-    setProgress("");
-    setIsLoading(false);
-  }, []);
+    updateSessionState(currentSessionKey.current, () => emptySessionState());
+  }, [updateSessionState]);
 
   const loadSession = useCallback(
-    async (key: string) => {
+    async (key: string): Promise<LoadedSession | null> => {
       currentSessionKey.current = key;
       try {
         const safeKey = key.replace(":", "__");
@@ -110,28 +176,45 @@ export function useChat({
         );
         if (res.ok) {
           const data = await res.json();
-          setMessages(
-            (data.messages || []).map((m: any, i: number) => ({
-              id: `${m.role}-${i}`,
-              role: m.role,
-              content: typeof m.content === "string" ? m.content : "",
-              images: Array.isArray(m.images) ? m.images : [],
-              timestamp: m.timestamp || "",
-            }))
+          const messages = (data.messages || []).map((m: any, i: number) => ({
+            id: `${m.role}-${i}`,
+            role: m.role,
+            content: typeof m.content === "string" ? m.content : "",
+            images: Array.isArray(m.images) ? m.images : [],
+            attachments: Array.isArray(m.attachments) ? m.attachments : [],
+            timestamp: m.timestamp || "",
+          })).filter(
+            (message: ChatMessage) =>
+              message.content || (message.images?.length || 0) > 0 || (message.attachments?.length || 0) > 0
           );
+          updateSessionState(key, (state) => ({
+            ...state,
+            messages: mergeLoadedMessages(messages, state.messages),
+          }));
+          return {
+            key,
+            messages,
+            modelId: typeof data.modelId === "string" ? data.modelId : undefined,
+          };
         }
       } catch {
         // Failed to load session; start fresh
-        setMessages([]);
+        updateSessionState(key, (state) => ({
+          ...state,
+          messages: [],
+        }));
       }
+      return null;
     },
-    [gatewayUrl]
+    [gatewayUrl, updateSessionState]
   );
 
+  const activeState = sessionStates[currentSessionKey.current] || emptySessionState();
+
   return {
-    messages,
-    isLoading,
-    progress,
+    messages: activeState.messages,
+    isLoading: activeState.isLoading,
+    progress: activeState.progress,
     connected,
     send,
     clearMessages,

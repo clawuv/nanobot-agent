@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   PlusIcon,
@@ -8,6 +8,7 @@ import {
   RefreshIcon,
   CloseIcon,
   GPTIcon,
+  ProjectIcon,
 } from "./Icons";
 import MessageBubble from "./MessageBubble";
 import type { ChatMessage } from "../hooks/useChat";
@@ -16,23 +17,26 @@ interface ChatMainProps {
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   onNewChat: () => void;
+  sessionKey: string;
   messages: ChatMessage[];
   isLoading: boolean;
   progress: string;
   connected: boolean;
-  onSend: (content: string, images?: string[]) => void;
+  onSend: (content: string, media?: string[], images?: string[], attachments?: string[]) => void;
   modelLabel?: string;
   providerLabel?: string;
   modelOptions?: Array<{ id: string; name: string; enabled: boolean }>;
   selectedModelId?: string;
   onSelectModel?: (modelId: string) => void;
   modelSwitching?: boolean;
+  sessionModelDebugLabel?: string;
 }
 
 interface PendingImage {
+  kind: "image" | "file";
   path: string;
   name: string;
-  previewUrl: string;
+  previewUrl?: string;
 }
 
 interface ImagePathInfo {
@@ -47,10 +51,39 @@ interface PreviewImage {
   src: string;
 }
 
+interface ComposerDraft {
+  inputValue: string;
+  pendingImages: PendingImage[];
+  attachmentError: string;
+}
+
+const emptyDraft = (): ComposerDraft => ({
+  inputValue: "",
+  pendingImages: [],
+  attachmentError: "",
+});
+
+const MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024;
+const SUPPORTED_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp"]);
+
+const normalizeLocalPath = (rawPath: string): string => {
+  if (!rawPath) return "";
+  try {
+    if (rawPath.startsWith("file://")) {
+      const url = new URL(rawPath);
+      return decodeURIComponent(url.pathname);
+    }
+    return decodeURIComponent(rawPath);
+  } catch {
+    return rawPath;
+  }
+};
+
 const ChatMain: React.FC<ChatMainProps> = ({
   sidebarOpen,
   onToggleSidebar,
   onNewChat,
+  sessionKey,
   messages,
   isLoading,
   progress,
@@ -62,18 +95,19 @@ const ChatMain: React.FC<ChatMainProps> = ({
   selectedModelId,
   onSelectModel,
   modelSwitching,
+  sessionModelDebugLabel,
 }) => {
-  const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
-  const SUPPORTED_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp"]);
-  const [inputValue, setInputValue] = useState("");
-  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, ComposerDraft>>({});
   const [dragOver, setDragOver] = useState(false);
   const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null);
-  const [attachmentError, setAttachmentError] = useState("");
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
+  const draft = drafts[sessionKey] || emptyDraft();
+  const inputValue = draft.inputValue;
+  const pendingImages = draft.pendingImages;
+  const attachmentError = draft.attachmentError;
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -102,6 +136,22 @@ const ChatMain: React.FC<ChatMainProps> = ({
   }, [previewImage]);
 
   useEffect(() => {
+    setDragOver(false);
+    setPreviewImage(null);
+    setModelMenuOpen(false);
+    if (inputRef.current) {
+      inputRef.current.style.height = "auto";
+    }
+  }, [sessionKey]);
+
+  const updateDraft = (updater: (current: ComposerDraft) => ComposerDraft) => {
+    setDrafts((prev) => ({
+      ...prev,
+      [sessionKey]: updater(prev[sessionKey] || emptyDraft()),
+    }));
+  };
+
+  useEffect(() => {
     if (!modelMenuOpen) return;
 
     const handlePointerDown = (event: MouseEvent) => {
@@ -124,40 +174,54 @@ const ChatMain: React.FC<ChatMainProps> = ({
     };
   }, [modelMenuOpen]);
 
-  const appendPendingImages = (paths: string[]) => {
-    setPendingImages((prev) => {
-      const existing = new Set(prev.map((item) => item.path));
-      const next = [...prev];
-      for (const path of paths) {
+  const appendPendingImages = (items: ImagePathInfo[]) => {
+    void (async () => {
+      const existing = new Set((drafts[sessionKey] || emptyDraft()).pendingImages.map((item) => item.path));
+      const nextItems: PendingImage[] = [];
+      for (const item of items) {
+        const path = normalizeLocalPath(item.path);
         if (!path || existing.has(path)) continue;
-        next.push({
+        const isImage = SUPPORTED_IMAGE_EXTENSIONS.has(item.extension.toLowerCase());
+        let previewUrl: string | undefined;
+        if (isImage) {
+          previewUrl = await invoke<string>("load_image_preview", {
+            input: { path },
+          }).catch(() => undefined);
+        }
+        nextItems.push({
+          kind: isImage ? "image" : "file",
           path,
-          name: path.split(/[\\/]/).pop() || path,
-          previewUrl: convertFileSrc(path),
+          name: item.name || path.split(/[\\/]/).pop() || path,
+          previewUrl,
         });
       }
-      return next;
-    });
+      updateDraft((current) => ({
+        ...current,
+        pendingImages: [...current.pendingImages, ...nextItems],
+      }));
+    })();
   };
 
   const setAttachmentFeedback = (messages: string[]) => {
-    setAttachmentError(messages.filter(Boolean).join(" "));
+    updateDraft((current) => ({
+      ...current,
+      attachmentError: messages.filter(Boolean).join(" "),
+    }));
   };
 
   const validateImageInfos = (items: ImagePathInfo[]) => {
-    const accepted: string[] = [];
+    const accepted: ImagePathInfo[] = [];
     const rejected: string[] = [];
 
     for (const item of items) {
-      if (!SUPPORTED_IMAGE_EXTENSIONS.has(item.extension)) {
-        rejected.push(`${item.name} 格式不支持`);
+      if (item.sizeBytes > MAX_ATTACHMENT_SIZE_BYTES) {
+        rejected.push(`${item.name} 超过 20MB`);
         continue;
       }
-      if (item.sizeBytes > MAX_IMAGE_SIZE_BYTES) {
-        rejected.push(`${item.name} 超过 10MB`);
-        continue;
-      }
-      accepted.push(item.path);
+      accepted.push({
+        ...item,
+        path: normalizeLocalPath(item.path),
+      });
     }
 
     setAttachmentFeedback(rejected);
@@ -177,13 +241,15 @@ const ChatMain: React.FC<ChatMainProps> = ({
 
   const handleSend = () => {
     if ((!inputValue.trim() && pendingImages.length === 0) || isLoading) return;
+    const imagePaths = pendingImages.filter((item) => item.kind === "image").map((item) => item.path);
+    const attachmentPaths = pendingImages.filter((item) => item.kind === "file").map((item) => item.path);
     onSend(
       inputValue,
-      pendingImages.map((image) => image.path)
+      pendingImages.map((image) => image.path),
+      imagePaths,
+      attachmentPaths,
     );
-    setInputValue("");
-    setPendingImages([]);
-    setAttachmentError("");
+    updateDraft(() => emptyDraft());
     if (inputRef.current) {
       inputRef.current.style.height = "auto";
     }
@@ -192,7 +258,10 @@ const ChatMain: React.FC<ChatMainProps> = ({
   const handlePickImages = async () => {
     const selected = await open({
       multiple: true,
-      filters: [{ name: "Images", extensions: Array.from(SUPPORTED_IMAGE_EXTENSIONS) }],
+      title: "选择图片或附件",
+    }).catch(() => {
+      setAttachmentFeedback(["打开文件选择器失败"]);
+      return null;
     });
 
     if (!selected) return;
@@ -202,7 +271,10 @@ const ChatMain: React.FC<ChatMainProps> = ({
   };
 
   const handleRemovePendingImage = (path: string) => {
-    setPendingImages((prev) => prev.filter((image) => image.path !== path));
+    updateDraft((current) => ({
+      ...current,
+      pendingImages: current.pendingImages.filter((image) => image.path !== path),
+    }));
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -225,8 +297,8 @@ const ChatMain: React.FC<ChatMainProps> = ({
       const file = item.getAsFile();
       if (!file) continue;
 
-      if (file.size > MAX_IMAGE_SIZE_BYTES) {
-        rejected.push(`${file.name || "粘贴图片"} 超过 10MB`);
+      if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
+        rejected.push(`${file.name || "粘贴图片"} 超过 20MB`);
         continue;
       }
       if (file.type && !file.type.startsWith("image/")) {
@@ -287,11 +359,16 @@ const ChatMain: React.FC<ChatMainProps> = ({
 
     for (const file of files) {
       if (!file.type.startsWith("image/")) {
-        rejected.push(`${file.name} 不是图片`);
+        const path = (file as File & { path?: string }).path || "";
+        if (path) {
+          acceptedPaths.push(path);
+        } else {
+          rejected.push(`${file.name} 无法读取本地路径`);
+        }
         continue;
       }
-      if (file.size > MAX_IMAGE_SIZE_BYTES) {
-        rejected.push(`${file.name} 超过 10MB`);
+      if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
+        rejected.push(`${file.name} 超过 20MB`);
         continue;
       }
       const path = (file as File & { path?: string }).path || "";
@@ -321,44 +398,51 @@ const ChatMain: React.FC<ChatMainProps> = ({
           )}
           <div className="chat-model-selector">
             {modelOptions && modelOptions.length > 0 ? (
-              <div className="chat-model-switch-wrap" ref={modelMenuRef}>
-                <button
-                  type="button"
-                  className="chat-model-switch"
-                  disabled={modelSwitching}
-                  onClick={() => setModelMenuOpen((prev) => !prev)}
-                  title={providerLabel ? `${modelLabel || "nanobot"} · ${providerLabel}` : modelLabel || "nanobot"}
-                  aria-haspopup="menu"
-                  aria-expanded={modelMenuOpen}
-                >
-                  <GPTIcon className="chat-model-icon" />
-                  <span>{modelLabel || "nanobot"}</span>
-                </button>
-                {modelMenuOpen ? (
-                  <div className="chat-model-menu" role="menu">
-                    {modelOptions.map((item) => {
-                      const isSelected = item.id === selectedModelId;
-                      return (
-                        <button
-                          key={item.id}
-                          type="button"
-                          role="menuitemradio"
-                          aria-checked={isSelected}
-                          className={`chat-model-menu-item ${isSelected ? "selected" : ""}`}
-                          disabled={!item.enabled || modelSwitching}
-                          onClick={() => {
-                            setModelMenuOpen(false);
-                            if (!isSelected) {
-                              onSelectModel?.(item.id);
-                            }
-                          }}
-                        >
-                          <span className="chat-model-menu-check">{isSelected ? "✓" : ""}</span>
-                          <span className="chat-model-menu-label">{item.name}</span>
-                          {!item.enabled ? <span className="chat-model-menu-meta">停用</span> : null}
-                        </button>
-                      );
-                    })}
+              <div className="chat-model-stack">
+                <div className="chat-model-switch-wrap" ref={modelMenuRef}>
+                  <button
+                    type="button"
+                    className="chat-model-switch"
+                    disabled={modelSwitching}
+                    onClick={() => setModelMenuOpen((prev) => !prev)}
+                    title={providerLabel ? `${modelLabel || "nanobot"} · ${providerLabel}` : modelLabel || "nanobot"}
+                    aria-haspopup="menu"
+                    aria-expanded={modelMenuOpen}
+                  >
+                    <GPTIcon className="chat-model-icon" />
+                    <span>{modelLabel || "nanobot"}</span>
+                  </button>
+                  {modelMenuOpen ? (
+                    <div className="chat-model-menu" role="menu">
+                      {modelOptions.map((item) => {
+                        const isSelected = item.id === selectedModelId;
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={isSelected}
+                            className={`chat-model-menu-item ${isSelected ? "selected" : ""}`}
+                            disabled={!item.enabled || modelSwitching}
+                            onClick={() => {
+                              setModelMenuOpen(false);
+                              if (!isSelected) {
+                                onSelectModel?.(item.id);
+                              }
+                            }}
+                          >
+                            <span className="chat-model-menu-check">{isSelected ? "✓" : ""}</span>
+                            <span className="chat-model-menu-label">{item.name}</span>
+                            {!item.enabled ? <span className="chat-model-menu-meta">停用</span> : null}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+                {sessionModelDebugLabel ? (
+                  <div className="chat-model-debug" title={sessionModelDebugLabel}>
+                    {sessionModelDebugLabel}
                   </div>
                 ) : null}
               </div>
@@ -390,7 +474,9 @@ const ChatMain: React.FC<ChatMainProps> = ({
         ) : (
           <div className="chat-messages">
             {messages.map((msg) => (
-              <MessageBubble key={msg.id} message={msg} onPreviewImage={setPreviewImage} />
+              (msg.content || (msg.images?.length || 0) > 0 || (msg.attachments?.length || 0) > 0) ? (
+                <MessageBubble key={msg.id} message={msg} onPreviewImage={setPreviewImage} />
+              ) : null
             ))}
 
             {/* Loading / Progress */}
@@ -425,7 +511,13 @@ const ChatMain: React.FC<ChatMainProps> = ({
             <div className="chat-attachments">
               {pendingImages.map((image) => (
                 <div className="chat-attachment-chip" key={image.path}>
-                  <img className="chat-attachment-thumb" src={image.previewUrl} alt={image.name} />
+                  {image.kind === "image" && image.previewUrl ? (
+                    <img className="chat-attachment-thumb" src={image.previewUrl} alt={image.name} />
+                  ) : (
+                    <div className="chat-attachment-file-icon">
+                      <ProjectIcon />
+                    </div>
+                  )}
                   <div className="chat-attachment-meta">
                     <span className="chat-attachment-name">{image.name}</span>
                   </div>
@@ -433,7 +525,7 @@ const ChatMain: React.FC<ChatMainProps> = ({
                     className="chat-attachment-remove"
                     type="button"
                     onClick={() => handleRemovePendingImage(image.path)}
-                    title="移除图片"
+                    title="移除附件"
                   >
                     ×
                   </button>
@@ -448,7 +540,7 @@ const ChatMain: React.FC<ChatMainProps> = ({
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
           >
-            <button className="chat-input-plus" title="添加图片" type="button" onClick={handlePickImages}>
+            <button className="chat-input-plus" title="添加附件" type="button" onClick={handlePickImages}>
               <PlusIcon />
             </button>
             <textarea
@@ -456,7 +548,12 @@ const ChatMain: React.FC<ChatMainProps> = ({
               className="chat-input"
               placeholder="发送消息给 nanobot..."
               value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
+              onChange={(e) =>
+                updateDraft((current) => ({
+                  ...current,
+                  inputValue: e.target.value,
+                }))
+              }
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
               rows={1}
@@ -473,7 +570,7 @@ const ChatMain: React.FC<ChatMainProps> = ({
               </button>
             </div>
           </div>
-          <p className="chat-input-hint">支持点击加号、粘贴截图或拖拽图片到输入框，图片限 10MB，支持 Ctrl/Cmd+Enter 发送。</p>
+          <p className="chat-input-hint">支持点击加号选择附件、粘贴截图或拖拽文件到输入框，单个附件限 20MB，支持 Ctrl/Cmd+Enter 发送。</p>
         </div>
 
         <footer className="chat-footer">

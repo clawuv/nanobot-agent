@@ -11,6 +11,7 @@ import asyncio
 import json
 import re
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
@@ -18,7 +19,12 @@ from loguru import logger
 from nanobot.config.loader import get_config_path, save_config
 from nanobot.config.schema import ModelProfile
 from nanobot.providers.registry import PROVIDERS
-from nanobot.runtime.modeling import make_provider, resolve_active_model_runtime
+from nanobot.runtime.modeling import (
+    find_vision_model_profile,
+    make_provider,
+    model_supports_vision,
+    resolve_active_model_runtime,
+)
 
 if TYPE_CHECKING:
     from nanobot.agent.loop import AgentLoop
@@ -64,6 +70,7 @@ class GatewayAPI:
         app.router.add_get("/api/sessions", self._list_sessions)
         app.router.add_get("/api/sessions/{key}", self._get_session)
         app.router.add_delete("/api/sessions/{key}", self._delete_session)
+        app.router.add_put("/api/sessions/{key}/model", self._set_session_model)
         app.router.add_get("/api/status", self._get_status)
         app.router.add_get("/api/config", self._get_config)
         app.router.add_get("/api/models", self._list_models)
@@ -156,9 +163,12 @@ class GatewayAPI:
     async def _handle_chat_message(self, ws: web.WebSocketResponse, data: dict) -> None:
         """Process a chat message and stream the response via WebSocket."""
         content = data.get("content", "").strip()
-        images = [str(path) for path in (data.get("images") or []) if isinstance(path, str) and path.strip()]
-        model_id = str(data.get("model_id") or "").strip()
-        if not content and not images:
+        media = [
+            str(path)
+            for path in (data.get("media") or data.get("images") or [])
+            if isinstance(path, str) and path.strip()
+        ]
+        if not content and not media:
             await ws.send_json({"type": "error", "content": "Empty message"})
             return
 
@@ -172,7 +182,11 @@ class GatewayAPI:
                 return
             msg_type = "tool_hint" if tool_hint else "progress"
             try:
-                await ws.send_json({"type": msg_type, "content": text})
+                await ws.send_json({
+                    "type": msg_type,
+                    "content": text,
+                    "session_key": session_key,
+                })
             except Exception:
                 pass  # Client may have disconnected
 
@@ -180,42 +194,103 @@ class GatewayAPI:
             override_provider = None
             override_model = None
             override_context_window_tokens = None
+            session = self.session_manager.get_or_create(session_key)
+            requested_model_id = str(data.get("model_id") or session.metadata.get("model_id") or "").strip()
+            model_id = requested_model_id
+            has_image_media = any(Path(path).suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".heif"} for path in media)
             if model_id:
                 temp_config = self.config.model_copy(deep=True)
                 selected = next((item for item in temp_config.get_model_profiles() if item.id == model_id and item.enabled), None)
                 if selected is None:
                     await ws.send_json({"type": "error", "content": "Selected model is unavailable"})
                     return
+                if has_image_media and not model_supports_vision(selected.model):
+                    fallback = find_vision_model_profile(temp_config)
+                    if fallback is None:
+                        await ws.send_json({
+                            "type": "error",
+                            "content": "当前模型不支持图片识别，请先新增一个视觉模型，例如 Gemini、GPT-4o、Claude 3/4 或 GLM-4V。",
+                            "session_key": session_key,
+                        })
+                        return
+                    selected = fallback
+                    model_id = selected.id
+                elif requested_model_id:
+                    session.metadata["model_id"] = selected.id
+                    self.session_manager.save(session)
                 temp_config.agents.defaults.model_id = selected.id
                 override_provider, runtime = make_provider(temp_config)
                 override_model = runtime.profile.model
                 override_context_window_tokens = runtime.context_window_tokens
+            elif has_image_media:
+                runtime = resolve_active_model_runtime(self.config)
+                if not model_supports_vision(runtime.profile.model):
+                    fallback = find_vision_model_profile(self.config)
+                    if fallback is None:
+                        await ws.send_json({
+                            "type": "error",
+                            "content": "当前默认模型不支持图片识别，请先新增一个视觉模型，例如 Gemini、GPT-4o、Claude 3/4 或 GLM-4V。",
+                            "session_key": session_key,
+                        })
+                        return
+                    temp_config = self.config.model_copy(deep=True)
+                    temp_config.agents.defaults.model_id = fallback.id
+                    override_provider, runtime = make_provider(temp_config)
+                    override_model = runtime.profile.model
+                    override_context_window_tokens = runtime.context_window_tokens
+                    model_id = fallback.id
 
             response = await self.agent.process_direct(
                 content=content,
                 session_key=session_key,
                 channel=channel,
                 chat_id=chat_id,
-                media=images,
+                media=media,
+                metadata={
+                    "model_id": model_id or None,
+                    "provider_name": runtime.provider_name if model_id else None,
+                    "effective_model": runtime.profile.model if model_id else None,
+                } if model_id else {},
                 on_progress=on_progress,
                 override_provider=override_provider,
                 override_model=override_model,
                 override_context_window_tokens=override_context_window_tokens,
             )
 
+            images: list[str] = []
+            attachments: list[str] = []
+            session = self.session_manager.get_or_create(session_key)
+            for msg in reversed(session.messages):
+                if msg.get("role") != "assistant":
+                    continue
+                parsed = self._serialize_session_content(msg.get("content"))
+                images = parsed["images"]
+                attachments = parsed["attachments"]
+                break
+
             if not ws.closed:
                 await ws.send_json({
                     "type": "reply",
                     "content": response or "",
                     "session_key": session_key,
+                    "images": images,
+                    "attachments": attachments,
                 })
         except asyncio.CancelledError:
             if not ws.closed:
-                await ws.send_json({"type": "error", "content": "Request cancelled"})
+                await ws.send_json({
+                    "type": "error",
+                    "content": "Request cancelled",
+                    "session_key": session_key,
+                })
         except Exception as e:
             logger.error("Error processing desktop chat message: {}", e)
             if not ws.closed:
-                await ws.send_json({"type": "error", "content": str(e)})
+                await ws.send_json({
+                    "type": "error",
+                    "content": str(e),
+                    "session_key": session_key,
+                })
 
     # ------------------------------------------------------------------ #
     # REST: Sessions
@@ -243,14 +318,21 @@ class GatewayAPI:
                     "role": role,
                     "content": parsed["content"],
                     "images": parsed["images"],
+                    "attachments": parsed["attachments"],
                     "timestamp": msg.get("timestamp", ""),
                 })
-        return web.json_response({"key": key, "messages": messages})
+        return web.json_response({
+            "key": key,
+            "messages": messages,
+            "metadata": session.metadata,
+            "modelId": session.metadata.get("model_id"),
+        })
 
     @staticmethod
     def _serialize_session_content(content: Any) -> dict[str, Any]:
         """Normalize stored session content for the desktop frontend."""
         image_paths: list[str] = []
+        attachment_paths: list[str] = []
         text_parts: list[str] = []
 
         def consume_text(text: str) -> None:
@@ -259,7 +341,10 @@ class GatewayAPI:
             cleaned = text
             for match in re.finditer(r"\[image:\s*([^\]]+)\]", text):
                 image_paths.append(match.group(1).strip())
+            for match in re.finditer(r"\[(?:file|attachment):\s*([^\]]+)\]", text):
+                attachment_paths.append(match.group(1).strip())
             cleaned = re.sub(r"\[image:\s*[^\]]+\]", "", cleaned).strip()
+            cleaned = re.sub(r"\[(?:file|attachment):\s*[^\]]+\]", "", cleaned).strip()
             if cleaned:
                 text_parts.append(cleaned)
 
@@ -275,16 +360,37 @@ class GatewayAPI:
         return {
             "content": "\n\n".join(text_parts).strip(),
             "images": image_paths,
+            "attachments": attachment_paths,
         }
 
     async def _delete_session(self, request: web.Request) -> web.Response:
-        """Clear a session (start new conversation)."""
+        """Delete a session entirely."""
+        key = request.match_info["key"].replace("__", ":")
+        removed = self.session_manager.delete(key)
+        return web.json_response({"ok": True, "key": key, "deleted": removed})
+
+    async def _set_session_model(self, request: web.Request) -> web.Response:
+        """Bind a model to a specific session."""
         key = request.match_info["key"].replace("__", ":")
         session = self.session_manager.get_or_create(key)
-        session.clear()
-        self.session_manager.save(session)
-        self.session_manager.invalidate(key)
-        return web.json_response({"ok": True, "key": key})
+        try:
+            body = await request.json()
+            model_id = str(body.get("modelId") or "").strip()
+            if not model_id:
+                session.metadata.pop("model_id", None)
+                self.session_manager.save(session)
+                return web.json_response({"ok": True, "key": key, "modelId": None})
+
+            selected = next((item for item in self.config.get_model_profiles() if item.id == model_id and item.enabled), None)
+            if selected is None:
+                return web.json_response({"error": "Selected model is unavailable"}, status=400)
+
+            session.metadata["model_id"] = selected.id
+            self.session_manager.save(session)
+            return web.json_response({"ok": True, "key": key, "modelId": selected.id})
+        except Exception as e:
+            logger.error("Failed to set session model for {}: {}", key, e)
+            return web.json_response({"error": str(e)}, status=500)
 
     # ------------------------------------------------------------------ #
     # REST: Status / Config

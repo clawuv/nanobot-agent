@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.tools.base import Tool
+from nanobot.providers.base import LLMProvider
 
 if TYPE_CHECKING:
     from nanobot.agent.subagent import SubagentManager
@@ -16,12 +17,22 @@ class SpawnTool(Tool):
         self._origin_channel = "cli"
         self._origin_chat_id = "direct"
         self._session_key = "cli:direct"
+        self._provider: LLMProvider | None = None
+        self._model: str | None = None
 
-    def set_context(self, channel: str, chat_id: str) -> None:
+    def set_context(
+        self,
+        channel: str,
+        chat_id: str,
+        provider: LLMProvider | None = None,
+        model: str | None = None,
+    ) -> None:
         """Set the origin context for subagent announcements."""
         self._origin_channel = channel
         self._origin_chat_id = chat_id
         self._session_key = f"{channel}:{chat_id}"
+        self._provider = provider
+        self._model = model
 
     @property
     def name(self) -> str:
@@ -60,4 +71,6 @@ class SpawnTool(Tool):
             origin_channel=self._origin_channel,
             origin_chat_id=self._origin_chat_id,
             session_key=self._session_key,
+            provider=self._provider,
+            model=self._model,
         )

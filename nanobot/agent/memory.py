@@ -251,6 +251,15 @@ class MemoryConsolidator:
         """Archive a selected message chunk into persistent memory."""
         return await self.store.consolidate(messages, self.provider, self.model)
 
+    async def consolidate_messages_with_runtime(
+        self,
+        messages: list[dict[str, object]],
+        provider: LLMProvider | None = None,
+        model: str | None = None,
+    ) -> bool:
+        """Archive messages using the given runtime when provided."""
+        return await self.store.consolidate(messages, provider or self.provider, model or self.model)
+
     def pick_consolidation_boundary(
         self,
         session: Session,
@@ -275,6 +284,15 @@ class MemoryConsolidator:
 
     def estimate_session_prompt_tokens(self, session: Session) -> tuple[int, str]:
         """Estimate current prompt size for the normal session history view."""
+        return self.estimate_session_prompt_tokens_with_runtime(session)
+
+    def estimate_session_prompt_tokens_with_runtime(
+        self,
+        session: Session,
+        provider: LLMProvider | None = None,
+        model: str | None = None,
+    ) -> tuple[int, str]:
+        """Estimate prompt size using the given runtime when provided."""
         history = session.get_history(max_messages=0)
         channel, chat_id = (session.key.split(":", 1) if ":" in session.key else (None, None))
         probe_messages = self._build_messages(
@@ -284,38 +302,62 @@ class MemoryConsolidator:
             chat_id=chat_id,
         )
         return estimate_prompt_tokens_chain(
-            self.provider,
-            self.model,
+            provider or self.provider,
+            model or self.model,
             probe_messages,
             self._get_tool_definitions(),
         )
 
     async def archive_messages(self, messages: list[dict[str, object]]) -> bool:
         """Archive messages with guaranteed persistence (retries until raw-dump fallback)."""
+        return await self.archive_messages_with_runtime(messages)
+
+    async def archive_messages_with_runtime(
+        self,
+        messages: list[dict[str, object]],
+        provider: LLMProvider | None = None,
+        model: str | None = None,
+    ) -> bool:
+        """Archive messages with the given runtime when provided."""
         if not messages:
             return True
         for _ in range(self.store._MAX_FAILURES_BEFORE_RAW_ARCHIVE):
-            if await self.consolidate_messages(messages):
+            if await self.consolidate_messages_with_runtime(messages, provider=provider, model=model):
                 return True
         return True
 
     async def maybe_consolidate_by_tokens(self, session: Session) -> None:
         """Loop: archive old messages until prompt fits within half the context window."""
-        if not session.messages or self.context_window_tokens <= 0:
+        await self.maybe_consolidate_by_tokens_with_runtime(session)
+
+    async def maybe_consolidate_by_tokens_with_runtime(
+        self,
+        session: Session,
+        provider: LLMProvider | None = None,
+        model: str | None = None,
+        context_window_tokens: int | None = None,
+    ) -> None:
+        """Loop: archive old messages until prompt fits within half the given context window."""
+        effective_context_window_tokens = context_window_tokens or self.context_window_tokens
+        if not session.messages or effective_context_window_tokens <= 0:
             return
 
         lock = self.get_lock(session.key)
         async with lock:
-            target = self.context_window_tokens // 2
-            estimated, source = self.estimate_session_prompt_tokens(session)
+            target = effective_context_window_tokens // 2
+            estimated, source = self.estimate_session_prompt_tokens_with_runtime(
+                session,
+                provider=provider,
+                model=model,
+            )
             if estimated <= 0:
                 return
-            if estimated < self.context_window_tokens:
+            if estimated < effective_context_window_tokens:
                 logger.debug(
                     "Token consolidation idle {}: {}/{} via {}",
                     session.key,
                     estimated,
-                    self.context_window_tokens,
+                    effective_context_window_tokens,
                     source,
                 )
                 return
@@ -343,15 +385,19 @@ class MemoryConsolidator:
                     round_num,
                     session.key,
                     estimated,
-                    self.context_window_tokens,
+                    effective_context_window_tokens,
                     source,
                     len(chunk),
                 )
-                if not await self.consolidate_messages(chunk):
+                if not await self.consolidate_messages_with_runtime(chunk, provider=provider, model=model):
                     return
                 session.last_consolidated = end_idx
                 self.sessions.save(session)
 
-                estimated, source = self.estimate_session_prompt_tokens(session)
+                estimated, source = self.estimate_session_prompt_tokens_with_runtime(
+                    session,
+                    provider=provider,
+                    model=model,
+                )
                 if estimated <= 0:
                     return

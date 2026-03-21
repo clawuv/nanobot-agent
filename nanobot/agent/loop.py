@@ -176,7 +176,12 @@ class AgentLoop:
         for name in ("message", "spawn", "cron"):
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
-                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+                    if name == "message":
+                        tool.set_context(channel, chat_id, *([message_id] if message_id else []))
+                    elif name == "spawn":
+                        tool.set_context(channel, chat_id, self.provider, self.model)
+                    else:
+                        tool.set_context(channel, chat_id)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -200,22 +205,26 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        provider: LLMProvider | None = None,
+        model: str | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop."""
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        active_provider = provider or self.provider
+        active_model = model or self.model
 
         while iteration < self.max_iterations:
             iteration += 1
 
             tool_defs = self.tools.get_definitions()
 
-            response = await self.provider.chat_with_retry(
+            response = await active_provider.chat_with_retry(
                 messages=messages,
                 tools=tool_defs,
-                model=self.model,
+                model=active_model,
             )
 
             if response.has_tool_calls:
@@ -374,6 +383,9 @@ class AgentLoop:
         msg: InboundMessage,
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        runtime_provider: LLMProvider | None = None,
+        runtime_model: str | None = None,
+        runtime_context_window_tokens: int | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         # System messages: parse origin from chat_id ("channel:chat_id")
@@ -383,7 +395,12 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
-            await self.memory_consolidator.maybe_consolidate_by_tokens(session)
+            await self.memory_consolidator.maybe_consolidate_by_tokens_with_runtime(
+                session,
+                provider=runtime_provider,
+                model=runtime_model,
+                context_window_tokens=runtime_context_window_tokens,
+            )
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=0)
             # Subagent results should be assistant role, other system messages use user role
@@ -392,6 +409,9 @@ class AgentLoop:
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
                 current_role=current_role,
+                model_id=msg.metadata.get("model_id") if isinstance(msg.metadata, dict) else None,
+                provider_name=msg.metadata.get("provider_name") if isinstance(msg.metadata, dict) else None,
+                model_name=msg.metadata.get("effective_model") if isinstance(msg.metadata, dict) else runtime_model,
             )
             final_content, _, all_msgs = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
@@ -430,9 +450,18 @@ class AgentLoop:
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
             )
-        await self.memory_consolidator.maybe_consolidate_by_tokens(session)
+        await self.memory_consolidator.maybe_consolidate_by_tokens_with_runtime(
+            session,
+            provider=runtime_provider,
+            model=runtime_model,
+            context_window_tokens=runtime_context_window_tokens,
+        )
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+        if runtime_provider and runtime_model:
+            if spawn_tool := self.tools.get("spawn"):
+                if hasattr(spawn_tool, "set_context"):
+                    spawn_tool.set_context(msg.channel, msg.chat_id, runtime_provider, runtime_model)
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
@@ -443,6 +472,9 @@ class AgentLoop:
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
+            model_id=msg.metadata.get("model_id") if isinstance(msg.metadata, dict) else None,
+            provider_name=msg.metadata.get("provider_name") if isinstance(msg.metadata, dict) else None,
+            model_name=msg.metadata.get("effective_model") if isinstance(msg.metadata, dict) else runtime_model,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -454,7 +486,10 @@ class AgentLoop:
             ))
 
         final_content, _, all_msgs = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
+            initial_messages,
+            on_progress=on_progress or _bus_progress,
+            provider=runtime_provider,
+            model=runtime_model,
         )
 
         if final_content is None:
@@ -462,9 +497,26 @@ class AgentLoop:
 
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
-        self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+        self._schedule_background(
+            self.memory_consolidator.maybe_consolidate_by_tokens_with_runtime(
+                session,
+                provider=runtime_provider,
+                model=runtime_model,
+                context_window_tokens=runtime_context_window_tokens,
+            )
+        )
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
+            if msg.channel == "desktop" and mt.turn_messages:
+                for outbound in mt.turn_messages:
+                    placeholder_block = self._media_placeholders(outbound.media)
+                    content = (outbound.content or "").strip()
+                    if self._should_suppress_media_caption(content, outbound.media):
+                        content = ""
+                    if placeholder_block:
+                        content = f"{content}\n{placeholder_block}".strip()
+                    session.add_message("assistant", content)
+                self.sessions.save(session)
             return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
@@ -511,6 +563,31 @@ class AgentLoop:
             session.messages.append(entry)
         session.updated_at = datetime.now()
 
+    @staticmethod
+    def _media_placeholders(media: list[str]) -> str:
+        parts: list[str] = []
+        for path in media:
+            suffix = Path(path).suffix.lower()
+            if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".heif"}:
+                parts.append(f"[image: {path}]")
+            else:
+                parts.append(f"[file: {path}]")
+        return "\n".join(parts)
+
+    @staticmethod
+    def _should_suppress_media_caption(content: str, media: list[str]) -> bool:
+        """Hide trivial captions for media-only desktop replies like screenshots."""
+        if not media:
+            return False
+        normalized = re.sub(r"\s+", "", (content or "").strip().lower())
+        return normalized in {
+            "桌面截屏",
+            "截图",
+            "屏幕截图",
+            "screenshot",
+            "screencapture",
+        }
+
     async def process_direct(
         self,
         content: str,
@@ -518,6 +595,7 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         media: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         override_provider: LLMProvider | None = None,
         override_model: str | None = None,
@@ -531,34 +609,16 @@ class AgentLoop:
             chat_id=chat_id,
             content=content,
             media=media or [],
+            metadata=metadata or {},
         )
 
         async with self._processing_lock:
-            original_provider = self.provider
-            original_model = self.model
-            original_context_window_tokens = self.context_window_tokens
-            original_subagent_provider = self.subagents.provider
-            original_subagent_model = self.subagents.model
-            original_memory_provider = self.memory_consolidator.provider
-            original_memory_model = self.memory_consolidator.model
-            original_memory_context_window_tokens = self.memory_consolidator.context_window_tokens
-
-            if override_provider and override_model and override_context_window_tokens is not None:
-                self.apply_runtime_model(
-                    provider=override_provider,
-                    model=override_model,
-                    context_window_tokens=override_context_window_tokens,
-                )
-
-            try:
-                response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
-                return response.content if response else ""
-            finally:
-                self.provider = original_provider
-                self.model = original_model
-                self.context_window_tokens = original_context_window_tokens
-                self.subagents.provider = original_subagent_provider
-                self.subagents.model = original_subagent_model
-                self.memory_consolidator.provider = original_memory_provider
-                self.memory_consolidator.model = original_memory_model
-                self.memory_consolidator.context_window_tokens = original_memory_context_window_tokens
+            response = await self._process_message(
+                msg,
+                session_key=session_key,
+                on_progress=on_progress,
+                runtime_provider=override_provider,
+                runtime_model=override_model,
+                runtime_context_window_tokens=override_context_window_tokens,
+            )
+            return response.content if response else ""

@@ -98,11 +98,23 @@ Your workspace is at: {workspace_path}
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
 
     @staticmethod
-    def _build_runtime_context(channel: str | None, chat_id: str | None) -> str:
+    def _build_runtime_context(
+        channel: str | None,
+        chat_id: str | None,
+        model_id: str | None = None,
+        provider_name: str | None = None,
+        model_name: str | None = None,
+    ) -> str:
         """Build untrusted runtime metadata block for injection before the user message."""
         lines = [f"Current Time: {current_time_str()}"]
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
+        if model_id:
+            lines.append(f"Session Model ID: {model_id}")
+        if provider_name:
+            lines.append(f"Effective Provider: {provider_name}")
+        if model_name:
+            lines.append(f"Effective Model: {model_name}")
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     def _load_bootstrap_files(self) -> str:
@@ -126,9 +138,18 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         channel: str | None = None,
         chat_id: str | None = None,
         current_role: str = "user",
+        model_id: str | None = None,
+        provider_name: str | None = None,
+        model_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
-        runtime_ctx = self._build_runtime_context(channel, chat_id)
+        runtime_ctx = self._build_runtime_context(
+            channel,
+            chat_id,
+            model_id=model_id,
+            provider_name=provider_name,
+            model_name=model_name,
+        )
         user_content = self._build_user_content(current_message, media)
 
         # Merge runtime context and user content into a single user message
@@ -145,11 +166,12 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         ]
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
-        """Build user message content with optional base64-encoded images."""
+        """Build user message content with inline file markers and optional base64 images."""
         if not media:
             return text
 
         images = []
+        file_markers: list[str] = []
         for path in media:
             p = Path(path)
             if not p.is_file():
@@ -158,6 +180,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             # Detect real MIME type from magic bytes; fallback to filename guess
             mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
             if not mime or not mime.startswith("image/"):
+                file_markers.append(f"[file: {p}]")
                 continue
             b64 = base64.b64encode(raw).decode()
             images.append({
@@ -166,9 +189,14 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
                 "_meta": {"path": str(p)},
             })
 
+        text_with_files = text
+        if file_markers:
+            suffix = "\n".join(file_markers)
+            text_with_files = f"{text}\n\n{suffix}" if text else suffix
+
         if not images:
-            return text
-        return images + [{"type": "text", "text": text}]
+            return text_with_files
+        return images + [{"type": "text", "text": text_with_files}]
 
     def add_tool_result(
         self, messages: list[dict[str, Any]],

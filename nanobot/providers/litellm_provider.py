@@ -4,6 +4,7 @@ import hashlib
 import os
 import secrets
 import string
+import re
 from typing import Any
 
 import json_repair
@@ -44,6 +45,7 @@ class LiteLLMProvider(LLMProvider):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
+        self.provider_name = provider_name
 
         # Detect gateway / local deployment.
         # provider_name (from config key) is the primary signal;
@@ -207,6 +209,39 @@ class LiteLLMProvider(LLMProvider):
                 clean["tool_call_id"] = map_id(clean["tool_call_id"])
         return sanitized
 
+    @staticmethod
+    def _zhipu_vision_compatible_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Normalize image blocks for Zhipu vision models.
+
+        Zhipu's current VLM docs show `image_url.url` should be raw base64 for local
+        images rather than a full `data:image/...;base64,...` data URL.
+        """
+        result: list[dict[str, Any]] = []
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                result.append(msg)
+                continue
+            new_content: list[Any] = []
+            changed = False
+            for item in content:
+                if not isinstance(item, dict) or item.get("type") != "image_url":
+                    new_content.append(item)
+                    continue
+                image_url = item.get("image_url") or {}
+                url = image_url.get("url")
+                if isinstance(url, str):
+                    match = re.match(r"^data:image/[^;]+;base64,(.+)$", url, flags=re.IGNORECASE | re.DOTALL)
+                    if match:
+                        new_item = dict(item)
+                        new_item["image_url"] = {**image_url, "url": match.group(1)}
+                        new_content.append(new_item)
+                        changed = True
+                        continue
+                new_content.append(item)
+            result.append({**msg, "content": new_content} if changed else msg)
+        return result
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -247,6 +282,9 @@ class LiteLLMProvider(LLMProvider):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+
+        if self.provider_name == "zhipu" and ("glm-4.5v" in original_model.lower() or "glm-4v" in original_model.lower()):
+            kwargs["messages"] = self._zhipu_vision_compatible_messages(kwargs["messages"])
 
         if self._gateway:
             kwargs.update(self._gateway.litellm_kwargs)

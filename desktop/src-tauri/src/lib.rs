@@ -70,6 +70,12 @@ struct ImageFileInfo {
     extension: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FilePathInput {
+    path: String,
+}
+
 #[tauri::command]
 fn get_gateway_url() -> String {
     std::env::var("NANOBOT_GATEWAY_URL").unwrap_or_else(|_| "ws://localhost:18790".to_string())
@@ -464,6 +470,35 @@ fn inspect_image_paths(input: InspectImagePathsInput) -> Result<Vec<ImageFileInf
     Ok(items)
 }
 
+fn detect_image_mime(data: &[u8]) -> Option<&'static str> {
+    if data.len() >= 8 && &data[..8] == b"\x89PNG\r\n\x1a\n" {
+        return Some("image/png");
+    }
+    if data.len() >= 3 && &data[..3] == b"\xff\xd8\xff" {
+        return Some("image/jpeg");
+    }
+    if data.len() >= 6 && (&data[..6] == b"GIF87a" || &data[..6] == b"GIF89a") {
+        return Some("image/gif");
+    }
+    if data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
+#[tauri::command]
+fn load_image_preview(input: FilePathInput) -> Result<String, String> {
+    let path = PathBuf::from(input.path.trim());
+    if !path.exists() || !path.is_file() {
+        return Err("图片文件不存在".to_string());
+    }
+
+    let bytes = fs::read(&path).map_err(|err| err.to_string())?;
+    let mime = detect_image_mime(&bytes).ok_or_else(|| "不支持的图片格式".to_string())?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{mime};base64,{encoded}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -479,7 +514,8 @@ pub fn run() {
             read_skill_content,
             update_skill_content,
             persist_clipboard_image,
-            inspect_image_paths
+            inspect_image_paths,
+            load_image_preview
         ])
         .setup(|app| {
             // --- System Tray ---

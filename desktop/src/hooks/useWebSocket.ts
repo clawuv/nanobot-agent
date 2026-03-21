@@ -4,6 +4,8 @@ export interface WSMessage {
   type: "reply" | "progress" | "tool_hint" | "error" | "pong";
   content: string;
   session_key?: string;
+  images?: string[];
+  attachments?: string[];
 }
 
 interface UseWebSocketOptions {
@@ -65,11 +67,11 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
   }, []);
 
   const sendMessage = useCallback(
-    (content: string, sessionKey?: string, images: string[] = [], modelId?: string) => {
+    (content: string, sessionKey?: string, media: string[] = [], modelId?: string) => {
       send({
         type: "message",
         content,
-        images,
+        media,
         session_key: sessionKey || "desktop:direct",
         model_id: modelId || null,
       });

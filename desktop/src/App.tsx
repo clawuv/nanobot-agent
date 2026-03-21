@@ -33,18 +33,21 @@ function App() {
   const [resolvedTheme, setResolvedTheme] = useState<"dark" | "light">("dark");
   const [activeModelLabel, setActiveModelLabel] = useState("nanobot");
   const [activeProviderLabel, setActiveProviderLabel] = useState("");
-  const [modelOptions, setModelOptions] = useState<Array<{ id: string; name: string; enabled: boolean }>>([]);
+  const [modelOptions, setModelOptions] = useState<Array<{ id: string; name: string; enabled: boolean; provider: string }>>([]);
   const [defaultModelId, setDefaultModelId] = useState("");
+  const [currentSessionModelId, setCurrentSessionModelId] = useState("");
+  const [providerLabels, setProviderLabels] = useState<Record<string, string>>({});
   const [switchingModel, setSwitchingModel] = useState(false);
   const [modelSwitchFeedback, setModelSwitchFeedback] = useState("");
   const [gatewayUrl, setGatewayUrl] = useState(() => {
     return localStorage.getItem("nanobot_gateway_url") || "ws://localhost:18790";
   });
+  const httpUrl = gatewayUrl.replace("ws://", "http://").replace("wss://", "https://");
 
   const chat = useChat({
     gatewayUrl,
     sessionKey: currentSessionKey,
-    modelId: defaultModelId,
+    modelId: currentSessionModelId || defaultModelId,
   });
 
   const toggleSidebar = () => setSidebarOpen((prev) => !prev);
@@ -52,15 +55,17 @@ function App() {
   const handleNewChat = useCallback(() => {
     const key = `desktop:${Date.now()}`;
     setCurrentSessionKey(key);
+    setCurrentSessionModelId(defaultModelId);
     chat.clearMessages();
-  }, [chat]);
+  }, [chat, defaultModelId]);
 
   const handleSelectSession = useCallback(
-    (key: string) => {
+    async (key: string) => {
       setCurrentSessionKey(key);
-      chat.loadSession(key);
+      const session = await chat.loadSession(key);
+      setCurrentSessionModelId(session?.modelId || defaultModelId);
     },
-    [chat]
+    [chat, defaultModelId]
   );
 
   const handleDeleteSession = useCallback(
@@ -74,10 +79,11 @@ function App() {
       }
       if (key === currentSessionKey) {
         setCurrentSessionKey("desktop:direct");
+        setCurrentSessionModelId(defaultModelId);
         chat.clearMessages();
       }
     },
-    [gatewayUrl, currentSessionKey, chat]
+    [gatewayUrl, currentSessionKey, chat, defaultModelId]
   );
 
   const handleGatewayUrlChange = useCallback((url: string) => {
@@ -85,12 +91,6 @@ function App() {
     localStorage.setItem("nanobot_gateway_url", url);
     // Force page reload to reconnect WebSocket with new URL
     window.location.reload();
-  }, []);
-
-  // Load initial session
-  useEffect(() => {
-    chat.loadSession(currentSessionKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -128,8 +128,6 @@ function App() {
   }, [appearance.theme]);
 
   useEffect(() => {
-    const httpUrl = gatewayUrl.replace("ws://", "http://").replace("wss://", "https://");
-
     const loadConfig = async () => {
       try {
         const [configResponse, modelsResponse] = await Promise.all([
@@ -143,22 +141,30 @@ function App() {
         }
         const data = await configResponse.json();
         const nextLabel = data?.activeModel?.name || data?.model || "nanobot";
+        const nextDefaultModelId = data?.defaultModelId || "";
         setActiveModelLabel(nextLabel);
         setActiveProviderLabel(data?.provider || "");
-        setDefaultModelId(data?.defaultModelId || "");
+        setDefaultModelId(nextDefaultModelId);
         if (modelsResponse.ok) {
           const modelsData = await modelsResponse.json();
-          setModelOptions((modelsData?.items || []).map((item: { id: string; name: string; enabled: boolean }) => ({
+          setModelOptions((modelsData?.items || []).map((item: { id: string; name: string; enabled: boolean; provider: string }) => ({
             id: item.id,
             name: item.name,
             enabled: item.enabled,
+            provider: item.provider,
           })));
+          setProviderLabels(
+            Object.fromEntries(((modelsData?.providers || []) as Array<{ id: string; label: string }>).map((item) => [item.id, item.label]))
+          );
         }
+        setCurrentSessionModelId((prev) => prev || nextDefaultModelId);
       } catch {
         setActiveModelLabel("nanobot");
         setActiveProviderLabel("");
         setModelOptions([]);
         setDefaultModelId("");
+        setCurrentSessionModelId("");
+        setProviderLabels({});
       }
     };
 
@@ -168,16 +174,35 @@ function App() {
     return () => window.removeEventListener("nanobot-config-changed", onConfigChanged);
   }, [gatewayUrl]);
 
+  useEffect(() => {
+    void (async () => {
+      const session = await chat.loadSession(currentSessionKey);
+      setCurrentSessionModelId(session?.modelId || defaultModelId);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const selectedModel = modelOptions.find((item) => item.id === (currentSessionModelId || defaultModelId));
+    if (selectedModel) {
+      setActiveModelLabel(selectedModel.name);
+      setActiveProviderLabel(providerLabels[selectedModel.provider] || selectedModel.provider);
+    }
+  }, [currentSessionModelId, defaultModelId, modelOptions, providerLabels]);
+
+  const sessionModelDebugLabel = currentSessionKey ? `当前会话ID: ${currentSessionKey}` : "";
+
   const handleQuickSwitchModel = useCallback(
     async (modelId: string) => {
-      if (!modelId || modelId === defaultModelId) return;
-      const httpUrl = gatewayUrl.replace("ws://", "http://").replace("wss://", "https://");
+      if (!modelId || modelId === currentSessionModelId) return;
       setSwitchingModel(true);
       setModelSwitchFeedback("");
       try {
-        const response = await fetch(`${httpUrl}/api/models/${modelId}/select`, {
-          method: "POST",
+        const safeKey = currentSessionKey.replace(":", "__");
+        const response = await fetch(`${httpUrl}/api/sessions/${safeKey}/model`, {
+          method: "PUT",
           headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ modelId: modelId || null }),
         });
         if (!response.ok) {
           const data = await response.json().catch(() => ({}));
@@ -185,15 +210,15 @@ function App() {
           return;
         }
         const selected = modelOptions.find((item) => item.id === modelId);
+        setCurrentSessionModelId(modelId);
         setModelSwitchFeedback(`已切换到 ${selected?.name || "新模型"}`);
-        window.dispatchEvent(new CustomEvent("nanobot-config-changed"));
       } catch {
         setModelSwitchFeedback("切换模型失败");
       } finally {
         setSwitchingModel(false);
       }
     },
-    [defaultModelId, gatewayUrl, modelOptions]
+    [currentSessionKey, currentSessionModelId, httpUrl, modelOptions]
   );
 
   useEffect(() => {
@@ -225,6 +250,7 @@ function App() {
             sidebarOpen={sidebarOpen}
             onToggleSidebar={toggleSidebar}
             onNewChat={handleNewChat}
+            sessionKey={currentSessionKey}
             messages={chat.messages}
             isLoading={chat.isLoading}
             progress={chat.progress}
@@ -233,9 +259,10 @@ function App() {
             modelLabel={activeModelLabel}
             providerLabel={activeProviderLabel}
             modelOptions={modelOptions}
-            selectedModelId={defaultModelId}
+            selectedModelId={currentSessionModelId || defaultModelId}
             onSelectModel={handleQuickSwitchModel}
             modelSwitching={switchingModel}
+            sessionModelDebugLabel={sessionModelDebugLabel}
           />
         </>
       ) : viewMode === "cron" ? (
