@@ -43,6 +43,7 @@ class SpawnTool(Tool):
         return (
             "Spawn a subagent to handle a task in the background. "
             "Use this for complex or time-consuming tasks that can run independently. "
+            "You can include the task goal, constraints, relevant paths, and done criteria. "
             "The subagent will complete the task and report back when done."
         )
 
@@ -59,15 +60,47 @@ class SpawnTool(Tool):
                     "type": "string",
                     "description": "Optional short label for the task (for display)",
                 },
+                "goal": {
+                    "type": "string",
+                    "description": "Optional higher-level goal explaining why the task matters",
+                },
+                "constraints": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional constraints the subagent must follow",
+                },
+                "relevant_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional files or directories the subagent should prioritize",
+                },
+                "done_when": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional completion criteria for the task",
+                },
             },
             "required": ["task"],
         }
 
-    async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        task: str,
+        label: str | None = None,
+        goal: str | None = None,
+        constraints: list[str] | None = None,
+        relevant_paths: list[str] | None = None,
+        done_when: list[str] | None = None,
+        **kwargs: Any,
+    ) -> str:
         """Spawn a subagent to execute the given task."""
         return await self._manager.spawn(
             task=task,
             label=label,
+            goal=goal,
+            constraints=constraints or [],
+            relevant_paths=relevant_paths or [],
+            done_when=done_when or [],
             origin_channel=self._origin_channel,
             origin_chat_id=self._origin_chat_id,
             session_key=self._session_key,

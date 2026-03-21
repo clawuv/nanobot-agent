@@ -397,61 +397,15 @@ const ChatMain: React.FC<ChatMainProps> = ({
             </button>
           )}
           <div className="chat-model-selector">
-            {modelOptions && modelOptions.length > 0 ? (
-              <div className="chat-model-stack">
-                <div className="chat-model-switch-wrap" ref={modelMenuRef}>
-                  <button
-                    type="button"
-                    className="chat-model-switch"
-                    disabled={modelSwitching}
-                    onClick={() => setModelMenuOpen((prev) => !prev)}
-                    title={providerLabel ? `${modelLabel || "nanobot"} · ${providerLabel}` : modelLabel || "nanobot"}
-                    aria-haspopup="menu"
-                    aria-expanded={modelMenuOpen}
-                  >
-                    <GPTIcon className="chat-model-icon" />
-                    <span>{modelLabel || "nanobot"}</span>
-                  </button>
-                  {modelMenuOpen ? (
-                    <div className="chat-model-menu" role="menu">
-                      {modelOptions.map((item) => {
-                        const isSelected = item.id === selectedModelId;
-                        return (
-                          <button
-                            key={item.id}
-                            type="button"
-                            role="menuitemradio"
-                            aria-checked={isSelected}
-                            className={`chat-model-menu-item ${isSelected ? "selected" : ""}`}
-                            disabled={!item.enabled || modelSwitching}
-                            onClick={() => {
-                              setModelMenuOpen(false);
-                              if (!isSelected) {
-                                onSelectModel?.(item.id);
-                              }
-                            }}
-                          >
-                            <span className="chat-model-menu-check">{isSelected ? "✓" : ""}</span>
-                            <span className="chat-model-menu-label">{item.name}</span>
-                            {!item.enabled ? <span className="chat-model-menu-meta">停用</span> : null}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : null}
-                </div>
-                {sessionModelDebugLabel ? (
-                  <div className="chat-model-debug" title={sessionModelDebugLabel}>
-                    {sessionModelDebugLabel}
-                  </div>
-                ) : null}
+            <span className="chat-model-name">
+              <GPTIcon className="chat-model-icon" />
+              <span>{modelLabel || "nanobot"}</span>
+            </span>
+            {sessionModelDebugLabel ? (
+              <div className="chat-model-debug" title={sessionModelDebugLabel}>
+                {sessionModelDebugLabel}
               </div>
-            ) : (
-              <span className="chat-model-name">
-                <GPTIcon className="chat-model-icon" />
-                <span>{modelLabel || "nanobot"}</span>
-              </span>
-            )}
+            ) : null}
           </div>
         </div>
         <div className="chat-header-right">
@@ -540,9 +494,6 @@ const ChatMain: React.FC<ChatMainProps> = ({
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
           >
-            <button className="chat-input-plus" title="添加附件" type="button" onClick={handlePickImages}>
-              <PlusIcon />
-            </button>
             <textarea
               ref={inputRef}
               className="chat-input"
@@ -558,24 +509,70 @@ const ChatMain: React.FC<ChatMainProps> = ({
               onPaste={handlePaste}
               rows={1}
               disabled={!connected}
-              />
-            <div className="chat-input-actions">
-              <button
-                className={`chat-input-send ${canSend ? "active" : ""}`}
-                onClick={handleSend}
-                disabled={!canSend}
-                title="发送"
-              >
-                <SendIcon />
-              </button>
+            />
+            <div className="chat-input-toolbar">
+              <div className="chat-input-toolbar-left">
+                <button className="chat-input-plus" title="添加附件" type="button" onClick={handlePickImages}>
+                  <PlusIcon />
+                </button>
+                {modelOptions && modelOptions.length > 0 ? (
+                  <div className="chat-composer-model-wrap" ref={modelMenuRef}>
+                    <button
+                      type="button"
+                      className="chat-composer-model-switch"
+                      disabled={modelSwitching}
+                      onClick={() => setModelMenuOpen((prev) => !prev)}
+                      title={providerLabel ? `${modelLabel || "nanobot"} · ${providerLabel}` : modelLabel || "nanobot"}
+                      aria-haspopup="menu"
+                      aria-expanded={modelMenuOpen}
+                    >
+                      <span className="chat-composer-model-label">{modelLabel || "nanobot"}</span>
+                      <span className="chat-composer-model-caret">▾</span>
+                    </button>
+                    {modelMenuOpen ? (
+                      <div className="chat-model-menu chat-model-menu-composer" role="menu">
+                        {modelOptions.map((item) => {
+                          const isSelected = item.id === selectedModelId;
+                          return (
+                            <button
+                              key={item.id}
+                              type="button"
+                              role="menuitemradio"
+                              aria-checked={isSelected}
+                              className={`chat-model-menu-item ${isSelected ? "selected" : ""}`}
+                              disabled={!item.enabled || modelSwitching}
+                              onClick={() => {
+                                setModelMenuOpen(false);
+                                if (!isSelected) {
+                                  onSelectModel?.(item.id);
+                                }
+                              }}
+                            >
+                              <span className="chat-model-menu-check">{isSelected ? "✓" : ""}</span>
+                              <span className="chat-model-menu-label">{item.name}</span>
+                              {!item.enabled ? <span className="chat-model-menu-meta">停用</span> : null}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+              <div className="chat-input-actions">
+                <button
+                  className={`chat-input-send ${canSend ? "active" : ""}`}
+                  onClick={handleSend}
+                  disabled={!canSend}
+                  title="发送"
+                >
+                  <SendIcon />
+                </button>
+              </div>
             </div>
           </div>
           <p className="chat-input-hint">支持点击加号选择附件、粘贴截图或拖拽文件到输入框，单个附件限 20MB，支持 Ctrl/Cmd+Enter 发送。</p>
         </div>
-
-        <footer className="chat-footer">
-          <p>nanobot Desktop — 超轻量个人 AI 助手</p>
-        </footer>
       </div>
 
       {previewImage && (

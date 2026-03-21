@@ -55,7 +55,7 @@ class HeartbeatService:
         workspace: Path,
         provider: LLMProvider,
         model: str,
-        on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
+        on_execute: Callable[[str], Coroutine[Any, Any, str | tuple[str, dict[str, Any]]]] | None = None,
         on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
         interval_s: int = 30 * 60,
         enabled: bool = True,
@@ -160,11 +160,12 @@ class HeartbeatService:
 
             logger.info("Heartbeat: tasks found, executing...")
             if self.on_execute:
-                response = await self.on_execute(tasks)
+                executed = await self.on_execute(tasks)
+                response, payload = self._normalize_execution_result(executed)
 
                 if response:
                     should_notify = await evaluate_response(
-                        response, tasks, self.provider, self.model,
+                        response, tasks, self.provider, self.model, result_payload=payload,
                     )
                     if should_notify and self.on_notify:
                         logger.info("Heartbeat: completed, delivering response")
@@ -182,4 +183,16 @@ class HeartbeatService:
         action, tasks = await self._decide(content)
         if action != "run" or not self.on_execute:
             return None
-        return await self.on_execute(tasks)
+        executed = await self.on_execute(tasks)
+        response, _ = self._normalize_execution_result(executed)
+        return response
+
+    @staticmethod
+    def _normalize_execution_result(
+        executed: str | tuple[str, dict[str, Any]],
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Normalize heartbeat execution results to text + optional metadata."""
+        if isinstance(executed, tuple) and len(executed) == 2 and isinstance(executed[1], dict):
+            payload = executed[1].get("subagent_result") if "subagent_result" in executed[1] else executed[1]
+            return executed[0], payload
+        return executed, None

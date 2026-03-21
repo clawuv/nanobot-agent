@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from nanobot.agent.subagent_result import SubagentResult
+
 if TYPE_CHECKING:
     from nanobot.providers.base import LLMProvider
 
@@ -55,6 +57,7 @@ async def evaluate_response(
     task_context: str,
     provider: LLMProvider,
     model: str,
+    result_payload: dict | None = None,
 ) -> bool:
     """Decide whether a background-task result should be delivered to the user.
 
@@ -63,6 +66,17 @@ async def evaluate_response(
     that important messages are never silently dropped.
     """
     try:
+        if isinstance(result_payload, dict):
+            structured = SubagentResult.from_payload(result_payload)
+            fast_path = _evaluate_structured_result(structured)
+            if fast_path is not None:
+                logger.info(
+                    "evaluate_response: structured fast-path should_notify={} status={}",
+                    fast_path,
+                    structured.status,
+                )
+                return fast_path
+
         llm_response = await provider.chat_with_retry(
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
@@ -90,3 +104,23 @@ async def evaluate_response(
     except Exception:
         logger.exception("evaluate_response failed, defaulting to notify")
         return True
+
+
+def _evaluate_structured_result(result: SubagentResult) -> bool | None:
+    """Return a deterministic notify decision when the structured result is clear."""
+    if result.status in {"error", "timeout", "cancelled"}:
+        return True
+    if result.status == "ok" and result.artifacts:
+        return True
+    if result.status == "ok" and not result.artifacts and not result.error:
+        summary = result.summary.strip().lower()
+        if summary in {
+            "",
+            "ok",
+            "done",
+            "all clear, no updates",
+            "no updates",
+            "nothing to report",
+        }:
+            return False
+    return None

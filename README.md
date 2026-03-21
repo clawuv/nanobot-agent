@@ -88,6 +88,28 @@
   <img src="nanobot_arch.png" alt="nanobot architecture" width="800">
 </p>
 
+## Background Subagents
+
+nanobot remains single-main-agent first, but it can spawn background subagents for independent work.
+
+- Use the `spawn` tool for work that can run on its own without blocking the next step.
+- When spawning, prefer filling `task`, `goal`, `constraints`, `relevant_paths`, and `done_when` so the subagent gets a clear task contract.
+- Subagent results now flow back as structured metadata before being summarized for the user.
+- Heartbeat and Cron post-run notification checks can use that structured result directly, so failures and deliverables are easier to notify reliably.
+
+Typical `spawn` payload:
+
+```json
+{
+  "task": "Review the latest docs changes and summarize risks",
+  "label": "docs review",
+  "goal": "Identify user-facing behavior changes",
+  "constraints": ["Do not modify files", "Keep the summary brief"],
+  "relevant_paths": ["./docs", "./README.md"],
+  "done_when": ["List major risks", "List affected files"]
+}
+```
+
 ## Table of Contents
 
 - [News](#-news)

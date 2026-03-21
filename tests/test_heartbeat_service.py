@@ -216,6 +216,71 @@ async def test_tick_suppresses_when_evaluator_says_no(tmp_path, monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_tick_passes_structured_payload_to_evaluator(tmp_path, monkeypatch) -> None:
+    (tmp_path / "HEARTBEAT.md").write_text("- [ ] check status", encoding="utf-8")
+
+    provider = DummyProvider([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="hb_1",
+                    name="heartbeat",
+                    arguments={"action": "run", "tasks": "check status"},
+                )
+            ],
+        ),
+    ])
+
+    seen_payloads: list[dict | None] = []
+
+    async def _on_execute(tasks: str) -> tuple[str, dict]:
+        return "created report", {
+            "subagent_result": {
+                "type": "subagent_result",
+                "task_id": "sub-1",
+                "label": "report",
+                "task": tasks,
+                "status": "ok",
+                "summary": "Created ./report.md",
+                "artifacts": ["./report.md"],
+                "notes": [],
+                "error": None,
+            }
+        }
+
+    async def _on_notify(response: str) -> None:
+        return None
+
+    service = HeartbeatService(
+        workspace=tmp_path,
+        provider=provider,
+        model="openai/gpt-4o-mini",
+        on_execute=_on_execute,
+        on_notify=_on_notify,
+    )
+
+    async def _eval_notify(response, task_context, provider, model, result_payload=None):
+        seen_payloads.append(result_payload)
+        return False
+
+    monkeypatch.setattr("nanobot.utils.evaluator.evaluate_response", _eval_notify)
+
+    await service._tick()
+    assert seen_payloads == [{
+        "type": "subagent_result",
+        "task_id": "sub-1",
+        "label": "report",
+        "task": "check status",
+        "status": "ok",
+        "summary": "Created ./report.md",
+        "artifacts": ["./report.md"],
+        "notes": [],
+        "error": None,
+    }]
+
+
+@pytest.mark.asyncio
 async def test_decide_retries_transient_error_then_succeeds(tmp_path, monkeypatch) -> None:
     provider = DummyProvider([
         LLMResponse(content="429 rate limit", finish_reason="error"),
@@ -286,4 +351,3 @@ async def test_decide_prompt_includes_current_time(tmp_path) -> None:
     user_msg = captured_messages[1]
     assert user_msg["role"] == "user"
     assert "Current Time:" in user_msg["content"]
-

@@ -169,6 +169,7 @@ class TestSubagentCancellation:
     @pytest.mark.asyncio
     async def test_subagent_preserves_reasoning_fields_in_tool_turn(self, monkeypatch, tmp_path):
         from nanobot.agent.subagent import SubagentManager
+        from nanobot.agent.subagent_task import SubagentTask
         from nanobot.bus.queue import MessageBus
         from nanobot.providers.base import LLMResponse, ToolCallRequest
 
@@ -199,7 +200,11 @@ class TestSubagentCancellation:
 
         monkeypatch.setattr("nanobot.agent.tools.registry.ToolRegistry.execute", fake_execute)
 
-        await mgr._run_subagent("sub-1", "do task", "label", {"channel": "test", "chat_id": "c1"})
+        await mgr._run_subagent(
+            "sub-1",
+            SubagentTask(task="do task", label="label"),
+            {"channel": "test", "chat_id": "c1"},
+        )
 
         assistant_messages = [
             msg for msg in captured_second_call
@@ -208,3 +213,53 @@ class TestSubagentCancellation:
         assert len(assistant_messages) == 1
         assert assistant_messages[0]["reasoning_content"] == "hidden reasoning"
         assert assistant_messages[0]["thinking_blocks"] == [{"type": "thinking", "thinking": "step"}]
+
+    @pytest.mark.asyncio
+    async def test_spawn_rejects_when_session_limit_reached(self):
+        from nanobot.agent.subagent import SubagentManager
+        from nanobot.bus.queue import MessageBus
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        mgr = SubagentManager(
+            provider=provider,
+            workspace=MagicMock(),
+            bus=bus,
+            max_concurrent=5,
+            max_per_session=1,
+        )
+        mgr._session_tasks["test:c1"] = {"sub-1"}
+
+        result = await mgr.spawn("do task", session_key="test:c1")
+        assert "maximum number of background tasks" in result
+
+    @pytest.mark.asyncio
+    async def test_subagent_announces_structured_result(self, monkeypatch, tmp_path):
+        from nanobot.agent.subagent import SubagentManager
+        from nanobot.agent.subagent_task import SubagentTask
+        from nanobot.bus.queue import MessageBus
+        from nanobot.providers.base import LLMResponse
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="./report.md"))
+        mgr = SubagentManager(provider=provider, workspace=tmp_path, bus=bus)
+
+        async def fake_execute(self, name, arguments):
+            return "tool result"
+
+        monkeypatch.setattr("nanobot.agent.tools.registry.ToolRegistry.execute", fake_execute)
+
+        await mgr._run_subagent(
+            "sub-1",
+            SubagentTask(task="write report", label="report"),
+            {"channel": "test", "chat_id": "c1"},
+        )
+
+        msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        payload = msg.metadata["subagent_result"]
+        assert payload["status"] == "ok"
+        assert payload["label"] == "report"
+        assert payload["artifacts"] == ["./report.md"]

@@ -1,5 +1,6 @@
 import pytest
 
+from nanobot.agent.subagent_result import SubagentResult
 from nanobot.utils.evaluator import evaluate_response
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
@@ -61,3 +62,50 @@ async def test_no_tool_call_fallback() -> None:
     provider = DummyProvider([LLMResponse(content="I think you should notify", tool_calls=[])])
     result = await evaluate_response("some response", "some task", provider, "m")
     assert result is True
+
+
+@pytest.mark.asyncio
+async def test_structured_error_fast_path_notifies() -> None:
+    provider = DummyProvider([])
+    payload = SubagentResult(
+        task_id="sub-1",
+        label="report",
+        task="write report",
+        status="error",
+        summary="Task failed",
+        error="boom",
+    ).to_payload()
+
+    result = await evaluate_response("Task failed", "write report", provider, "m", result_payload=payload)
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_structured_ok_with_artifacts_fast_path_notifies() -> None:
+    provider = DummyProvider([])
+    payload = SubagentResult(
+        task_id="sub-1",
+        label="report",
+        task="write report",
+        status="ok",
+        summary="Created ./report.md",
+        artifacts=["./report.md"],
+    ).to_payload()
+
+    result = await evaluate_response("Created ./report.md", "write report", provider, "m", result_payload=payload)
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_structured_routine_fast_path_suppresses() -> None:
+    provider = DummyProvider([])
+    payload = SubagentResult(
+        task_id="sub-1",
+        label="status",
+        task="check status",
+        status="ok",
+        summary="Nothing to report",
+    ).to_payload()
+
+    result = await evaluate_response("Nothing to report", "check status", provider, "m", result_payload=payload)
+    assert result is False

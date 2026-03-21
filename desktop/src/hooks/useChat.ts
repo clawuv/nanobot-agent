@@ -38,11 +38,10 @@ const emptySessionState = (): SessionChatState => ({
 const messageSignature = (message: ChatMessage): string =>
   JSON.stringify({
     role: message.role,
-      content: message.content,
-      images: message.images || [],
-      attachments: message.attachments || [],
-      timestamp: message.timestamp,
-    });
+    content: message.content,
+    images: message.images || [],
+    attachments: message.attachments || [],
+  });
 
 const mergeLoadedMessages = (loaded: ChatMessage[], local: ChatMessage[]): ChatMessage[] => {
   if (local.length === 0) return loaded;

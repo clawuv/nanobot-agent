@@ -78,6 +78,28 @@
   <img src="nanobot_arch.png" alt="nanobot architecture" width="800">
 </p>
 
+## 后台 Subagent
+
+nanobot 仍然以单主 Agent 为核心，但现在可以把独立任务派给后台 subagent 处理。
+
+- `spawn` 更适合不会阻塞下一步的独立工作。
+- 调用 `spawn` 时，建议尽量补齐 `task`、`goal`、`constraints`、`relevant_paths`、`done_when`，让 subagent 拿到清晰的任务契约。
+- subagent 的结果现在会先以结构化 metadata 回流，再由主 Agent 总结给用户。
+- Heartbeat 和 Cron 的通知判断也会优先利用这些结构化结果，因此失败、超时和产物类结果更容易被稳定通知。
+
+典型的 `spawn` 参数：
+
+```json
+{
+  "task": "Review the latest docs changes and summarize risks",
+  "label": "docs review",
+  "goal": "Identify user-facing behavior changes",
+  "constraints": ["Do not modify files", "Keep the summary brief"],
+  "relevant_paths": ["./docs", "./README.md"],
+  "done_when": ["List major risks", "List affected files"]
+}
+```
+
 ## ✨ 功能特性
 
 <table align="center">

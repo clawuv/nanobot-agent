@@ -16,6 +16,7 @@ from loguru import logger
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryConsolidator
 from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.subagent_result import SubagentResult
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -30,7 +31,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebSearchConfig
+    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, SubagentConfig, WebSearchConfig
     from nanobot.cron.service import CronService
 
 
@@ -59,13 +60,14 @@ class AgentLoop:
         web_search_config: WebSearchConfig | None = None,
         web_proxy: str | None = None,
         exec_config: ExecToolConfig | None = None,
+        subagent_config: "SubagentConfig | None" = None,
         cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
     ):
-        from nanobot.config.schema import ExecToolConfig, WebSearchConfig
+        from nanobot.config.schema import ExecToolConfig, SubagentConfig, WebSearchConfig
 
         self.bus = bus
         self.channels_config = channels_config
@@ -77,6 +79,7 @@ class AgentLoop:
         self.web_search_config = web_search_config or WebSearchConfig()
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
+        self.subagent_config = subagent_config or SubagentConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
 
@@ -92,6 +95,9 @@ class AgentLoop:
             web_proxy=web_proxy,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            max_concurrent=self.subagent_config.max_concurrent,
+            max_per_session=self.subagent_config.max_per_session,
+            timeout_seconds=self.subagent_config.timeout_seconds,
         )
 
         self._running = False
@@ -189,6 +195,23 @@ class AgentLoop:
         if not text:
             return None
         return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
+
+    @staticmethod
+    def _build_subagent_followup(payload: dict[str, Any]) -> str:
+        """Format a structured subagent result for the main agent."""
+        result = SubagentResult.from_payload(payload)
+        artifacts = "\n".join(f"- {item}" for item in result.artifacts) or "- none"
+        notes = "\n".join(f"- {item}" for item in result.notes) or "- none"
+        return (
+            "[Background task result]\n\n"
+            f"Label: {result.label}\n"
+            f"Status: {result.status}\n"
+            f"Summary: {result.summary}\n"
+            f"Artifacts:\n{artifacts}\n"
+            f"Notes:\n{notes}\n"
+            f"Error: {result.error or 'none'}\n\n"
+            "Reply naturally to the user in 1-2 sentences. Do not mention internal task IDs or subagent mechanics."
+        )
 
     @staticmethod
     def _tool_hint(tool_calls: list) -> str:
@@ -402,12 +425,17 @@ class AgentLoop:
                 context_window_tokens=runtime_context_window_tokens,
             )
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            current_message = (
+                self._build_subagent_followup(msg.metadata["subagent_result"])
+                if msg.sender_id == "subagent" and isinstance(msg.metadata.get("subagent_result"), dict)
+                else msg.content
+            )
             history = session.get_history(max_messages=0)
             # Subagent results should be assistant role, other system messages use user role
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
             messages = self.context.build_messages(
                 history=history,
-                current_message=msg.content, channel=channel, chat_id=chat_id,
+                current_message=current_message, channel=channel, chat_id=chat_id,
                 current_role=current_role,
                 model_id=msg.metadata.get("model_id") if isinstance(msg.metadata, dict) else None,
                 provider_name=msg.metadata.get("provider_name") if isinstance(msg.metadata, dict) else None,
@@ -417,8 +445,13 @@ class AgentLoop:
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
             self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
-            return OutboundMessage(channel=channel, chat_id=chat_id,
-                                  content=final_content or "Background task completed.")
+            meta = dict(msg.metadata or {})
+            return OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=final_content or "Background task completed.",
+                metadata=meta,
+            )
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
@@ -600,7 +633,8 @@ class AgentLoop:
         override_provider: LLMProvider | None = None,
         override_model: str | None = None,
         override_context_window_tokens: int | None = None,
-    ) -> str:
+        include_metadata: bool = False,
+    ) -> str | tuple[str, dict[str, Any]]:
         """Process a message directly (for CLI or cron usage)."""
         await self._connect_mcp()
         msg = InboundMessage(
@@ -621,4 +655,6 @@ class AgentLoop:
                 runtime_model=override_model,
                 runtime_context_window_tokens=override_context_window_tokens,
             )
+            if include_metadata:
+                return (response.content if response else "", dict(response.metadata if response else {}))
             return response.content if response else ""
