@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  ArrowLeftIcon,
   CloseIcon,
   GPTIcon,
   InfoIcon,
@@ -18,7 +17,6 @@ import {
 interface SettingsPageProps {
   gatewayUrl: string;
   onGatewayUrlChange: (url: string) => void;
-  onBack: () => void;
   appearance: AppearanceSettings;
   onAppearanceChange: (next: AppearanceSettings) => void;
 }
@@ -59,6 +57,13 @@ interface ModelItem {
 interface ProviderOption {
   id: string;
   label: string;
+  isOAuth?: boolean;
+}
+
+interface OAuthStatus {
+  authorized: boolean;
+  accountId?: string | null;
+  error?: string;
 }
 
 interface ModelDraft {
@@ -202,6 +207,13 @@ const PROVIDER_MODEL_OPTIONS: Record<string, string[]> = {
   deepseek: ["deepseek-chat", "deepseek-reasoner"],
 };
 
+const PROVIDER_MODEL_PLACEHOLDER: Record<string, string> = {
+  openai: "gpt-5",
+  openai_codex: "gpt-5",
+  gemini: "gemini-2.5-flash",
+  gemini_oauth: "gemini-2.5-flash",
+};
+
 const readJson = <T,>(key: string, fallback: T): T => {
   try {
     const raw = localStorage.getItem(key);
@@ -291,7 +303,6 @@ const SettingsRow: React.FC<SettingsRowProps> = ({ label, description, children 
 const SettingsPage: React.FC<SettingsPageProps> = ({
   gatewayUrl,
   onGatewayUrlChange,
-  onBack,
   appearance,
   onAppearanceChange,
 }) => {
@@ -310,6 +321,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
   const [modelTestMessage, setModelTestMessage] = useState("");
   const [modelTestStatus, setModelTestStatus] = useState<"success" | "error" | "">("");
   const [modelDraft, setModelDraft] = useState<ModelDraft>(emptyModelDraft);
+  const [oauthStatus, setOauthStatus] = useState<OAuthStatus | null>(null);
+  const [oauthLoading, setOauthLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
   const [channels, setChannels] = useState<ChannelItem[]>(() =>
@@ -318,8 +331,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsError, setSkillsError] = useState("");
-  const [newSkillName, setNewSkillName] = useState("");
-  const [newSkillDescription, setNewSkillDescription] = useState("");
+
   const [importSkillPath, setImportSkillPath] = useState("");
   const [skillActionLoading, setSkillActionLoading] = useState(false);
   const [selectedSkill, setSelectedSkill] = useState<SkillItem | null>(null);
@@ -329,6 +341,56 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
   const [mcpServers, setMcpServers] = useState<McpServerItem[]>(() =>
     readJson<McpServerItem[]>("nanobot_desktop_mcp", defaultMcpServers)
   );
+  const [mcpEditorOpen, setMcpEditorOpen] = useState(false);
+  const [mcpDraft, setMcpDraft] = useState<McpServerItem>({
+    id: "",
+    name: "",
+    transport: "stdio",
+    enabled: true,
+    endpoint: "",
+  });
+  const [mcpEditorError, setMcpEditorError] = useState("");
+
+  const openCreateMcp = () => {
+    setMcpDraft({
+      id: "mcp_" + Date.now().toString(36),
+      name: "",
+      transport: "stdio",
+      enabled: true,
+      endpoint: "",
+    });
+    setMcpEditorError("");
+    setMcpEditorOpen(true);
+  };
+
+  const openEditMcp = (item: McpServerItem) => {
+    setMcpDraft({ ...item });
+    setMcpEditorError("");
+    setMcpEditorOpen(true);
+  };
+
+  const deleteMcp = (item: McpServerItem) => {
+    if (!window.confirm(`确定删除 MCP 服务「${item.name}」吗？`)) return;
+    setMcpServers((prev) => prev.filter((m) => m.id !== item.id));
+    setSaveMessage("MCP 服务已删除");
+    window.setTimeout(() => setSaveMessage(""), 1600);
+  };
+
+  const saveMcp = () => {
+    if (!mcpDraft.name.trim()) return setMcpEditorError("名称不能为空");
+    if (!mcpDraft.endpoint.trim()) return setMcpEditorError("配置指令不能为空");
+
+    setMcpServers((prev) => {
+      const exists = prev.some((m) => m.id === mcpDraft.id);
+      if (exists) {
+        return prev.map((m) => (m.id === mcpDraft.id ? mcpDraft : m));
+      }
+      return [...prev, mcpDraft];
+    });
+    setMcpEditorOpen(false);
+    setSaveMessage("MCP 配置已保存");
+    window.setTimeout(() => setSaveMessage(""), 1600);
+  };
 
   const httpUrl = useMemo(
     () => gatewayUrl.replace("ws://", "http://").replace("wss://", "https://"),
@@ -539,6 +601,53 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
     setModelEditorOpen(true);
   };
 
+  const selectedProviderOption = useMemo(
+    () => providersOptions.find((option) => option.id === modelDraft.provider) || null,
+    [providersOptions, modelDraft.provider]
+  );
+  const isOAuthProvider = Boolean(selectedProviderOption?.isOAuth);
+  const oauthLoginCommand = modelDraft.provider === "gemini_oauth"
+    ? "gcloud auth application-default login"
+    : "nanobot provider login openai-codex";
+
+  useEffect(() => {
+    if (!modelEditorOpen || !isOAuthProvider) {
+      setOauthStatus(null);
+      setOauthLoading(false);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      setOauthLoading(true);
+      try {
+        const providerId = modelDraft.provider.replace(/_/g, "-");
+        const response = await fetch(`${httpUrl}/api/oauth/${providerId}/status`);
+        const data = await response.json().catch(() => ({}));
+        if (!cancelled) {
+          setOauthStatus({
+            authorized: Boolean(data.authorized),
+            accountId: typeof data.accountId === "string" ? data.accountId : null,
+            error: typeof data.error === "string" ? data.error : undefined,
+          });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setOauthStatus({
+            authorized: false,
+            error: error instanceof Error ? error.message : "检查授权状态失败",
+          });
+        }
+      } finally {
+        if (!cancelled) {
+          setOauthLoading(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [httpUrl, isOAuthProvider, modelDraft.provider, modelEditorOpen]);
+
   const openEditModel = (item: ModelItem) => {
     setModelDraft(modelDraftFromItem(item));
     setModelEditorError("");
@@ -623,7 +732,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
         reasoningEffort: modelDraft.reasoningEffort || null,
         enabled: modelDraft.enabled,
         // Keep old gateways working until they pick up model-level apiKey support.
-        providerConfig: modelDraft.provider === "auto"
+        providerConfig: modelDraft.provider === "auto" || isOAuthProvider
           ? null
           : {
             apiKey: modelDraft.apiKey.trim(),
@@ -649,6 +758,86 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
       setModelTestMessage(error instanceof Error ? error.message : "测试连通性失败");
     } finally {
       setModelActionLoading("");
+    }
+  };
+
+  const refreshOauthStatus = async () => {
+    if (!isOAuthProvider) return;
+    setOauthLoading(true);
+    try {
+      const providerId = modelDraft.provider.replace(/_/g, "-");
+      const response = await fetch(`${httpUrl}/api/oauth/${providerId}/status`);
+      const data = await response.json().catch(() => ({}));
+      setOauthStatus({
+        authorized: Boolean(data.authorized),
+        accountId: typeof data.accountId === "string" ? data.accountId : null,
+        error: typeof data.error === "string" ? data.error : undefined,
+      });
+    } catch (error) {
+      setOauthStatus({
+        authorized: false,
+        error: error instanceof Error ? error.message : "检查授权状态失败",
+      });
+    } finally {
+      setOauthLoading(false);
+    }
+  };
+
+  const revokeOauth = async () => {
+    if (!isOAuthProvider) return;
+    setOauthLoading(true);
+    try {
+      const providerId = modelDraft.provider.replace(/_/g, "-");
+      const response = await fetch(`${httpUrl}/api/oauth/${providerId}`, { method: "DELETE" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || "去授权失败");
+      }
+      setOauthStatus({ authorized: false });
+      setSaveMessage("OAuth 授权已清除");
+    } catch (error) {
+      setOauthStatus({
+        authorized: false,
+        error: error instanceof Error ? error.message : "去授权失败",
+      });
+    } finally {
+      setOauthLoading(false);
+    }
+  };
+
+  const importOauthConfig = async () => {
+    if (!isOAuthProvider) return;
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    const selectedPath = Array.isArray(selected) ? selected[0] : selected;
+    if (!selectedPath) return;
+    setOauthLoading(true);
+    try {
+      const providerId = modelDraft.provider.replace(/_/g, "-");
+      const response = await fetch(`${httpUrl}/api/oauth/${providerId}/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: selectedPath }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || "导入本地配置失败");
+      }
+      setOauthStatus({
+        authorized: Boolean(data.authorized),
+        accountId: typeof data.accountId === "string" ? data.accountId : null,
+      });
+      setSaveMessage("本地 OAuth 配置已导入");
+    } catch (error) {
+      setOauthStatus({
+        authorized: false,
+        error: error instanceof Error ? error.message : "导入本地配置失败",
+      });
+    } finally {
+      setOauthLoading(false);
     }
   };
 
@@ -711,16 +900,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
             />
           </div>
         </SettingsRow>
-        <SettingsRow label="连接协议">
-          <div className="settings-control-block">
-            <input
-              type="text"
-              className="settings-input"
-              value={localUrl.startsWith("wss://") ? "WSS" : "WS"}
-              readOnly
-            />
-          </div>
-        </SettingsRow>
+
         <SettingsRow label="HTTP API 基地址">
           <div className="settings-control-block">
             <input type="text" className="settings-input" value={httpUrl} readOnly />
@@ -986,57 +1166,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
             {workspacePath ? `${workspacePath}/skills` : "等待 gateway 返回 workspace 路径"}
           </div>
         </SettingsRow>
-        <SettingsRow label="新增 Skill" description="会创建 workspace/skills/<name>/SKILL.md 模板。">
-          <div className="settings-control-block settings-control-wide">
-            <div className="settings-inline-form">
-              <input
-                type="text"
-                className="settings-input"
-                value={newSkillName}
-                onChange={(event) => setNewSkillName(event.target.value)}
-                placeholder="skill-name"
-                disabled={!workspacePath || skillActionLoading}
-              />
-              <input
-                type="text"
-                className="settings-input"
-                value={newSkillDescription}
-                onChange={(event) => setNewSkillDescription(event.target.value)}
-                placeholder="Skill 描述"
-                disabled={!workspacePath || skillActionLoading}
-              />
-              <button
-                type="button"
-                className="settings-action-btn"
-                disabled={!workspacePath || !newSkillName.trim() || skillActionLoading}
-                onClick={async () => {
-                  if (!workspacePath || !newSkillName.trim()) return;
-                  setSkillActionLoading(true);
-                  setSkillsError("");
-                  try {
-                    await invoke("create_skill", {
-                      input: {
-                        workspacePath,
-                        name: newSkillName,
-                        description: newSkillDescription,
-                      },
-                    });
-                    setNewSkillName("");
-                    setNewSkillDescription("");
-                    setSaveMessage("Skill 已创建");
-                    void loadSkills(workspacePath);
-                  } catch (error) {
-                    setSkillsError(error instanceof Error ? error.message : "创建 Skill 失败");
-                  } finally {
-                    setSkillActionLoading(false);
-                  }
-                }}
-              >
-                添加
-              </button>
-            </div>
-          </div>
-        </SettingsRow>
+
         <SettingsRow label="导入 Skill" description="支持本地 skill 目录，或标准 .skill 包。">
           <div className="settings-control-block settings-control-wide">
             <div className="settings-inline-form">
@@ -1188,36 +1318,49 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
     <div className="settings-content-stack">
       <SettingsSection
         title="MCP 配置"
-        description="预留服务清单与启用状态。"
-        actions={<div className="settings-summary-badge">已启用 {enabledMcpCount} / {mcpServers.length}</div>}
+        description="本地 MCP 服务器清单与启用状态。"
+        actions={
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <div className="settings-summary-badge">已启用 {enabledMcpCount} / {mcpServers.length}</div>
+            <button type="button" className="settings-action-btn" onClick={openCreateMcp}>添加服务</button>
+          </div>
+        }
       >
-        <div className="settings-list settings-list-plain">
-          {mcpServers.map((item) => (
-            <div className="settings-list-item" key={item.id}>
-              <div className="settings-list-main">
-                <div className="settings-list-head">
-                  <strong>{item.name}</strong>
-                  <span className="settings-mini-pill neutral">{item.transport}</span>
+        {mcpServers.length === 0 ? (
+          <div className="settings-empty-card">当前没有配置任何 MCP 服务。</div>
+        ) : (
+          <div className="settings-list settings-list-plain">
+            {mcpServers.map((item) => (
+              <div className="settings-list-item" key={item.id}>
+                <div className="settings-list-main">
+                  <div className="settings-list-head">
+                    <strong>{item.name}</strong>
+                    <span className="settings-mini-pill neutral">{item.transport}</span>
+                  </div>
+                  <p className="settings-mono-text">{item.endpoint}</p>
                 </div>
-                <p className="settings-mono-text">{item.endpoint}</p>
+                <div className="settings-list-actions">
+                  <button type="button" className="settings-action-btn" onClick={() => openEditMcp(item)}>编辑</button>
+                  <button type="button" className="settings-action-btn danger" onClick={() => deleteMcp(item)}>删除</button>
+                  <label className="settings-switch" style={{ marginLeft: "8px" }}>
+                    <input
+                      type="checkbox"
+                      checked={item.enabled}
+                      onChange={(event) =>
+                        setMcpServers((prev) =>
+                          prev.map((server) =>
+                            server.id === item.id ? { ...server, enabled: event.target.checked } : server
+                          )
+                        )
+                      }
+                    />
+                    <span />
+                  </label>
+                </div>
               </div>
-              <label className="settings-switch">
-                <input
-                  type="checkbox"
-                  checked={item.enabled}
-                  onChange={(event) =>
-                    setMcpServers((prev) =>
-                      prev.map((server) =>
-                        server.id === item.id ? { ...server, enabled: event.target.checked } : server
-                      )
-                    )
-                  }
-                />
-                <span />
-              </label>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </SettingsSection>
     </div>
   );
@@ -1266,11 +1409,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
     <div className="settings-page">
       <div className="settings-shell-body">
         <aside className="settings-nav">
-          <div className="settings-nav-top">
-            <button className="cron-back-btn settings-back-item" onClick={onBack}>
-              <ArrowLeftIcon />
-              <span>返回聊天</span>
-            </button>
+          <div className="settings-nav-header">
+            <h1 className="settings-nav-title">设置</h1>
           </div>
           <div className="settings-nav-group">
             {sectionItems.map((item) => (
@@ -1281,7 +1421,6 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
               >
                 <span className="settings-nav-icon">{item.icon}</span>
                 <span className="settings-nav-label">{item.label}</span>
-                <span className="settings-nav-desc">{item.description}</span>
               </button>
             ))}
           </div>
@@ -1289,11 +1428,6 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
 
         <main className="settings-main">
           <header className="settings-shell-header">
-            <div>
-              <h1 className="settings-shell-title">
-                {sectionItems.find((item) => item.key === activeSection)?.label || "设置中心"}
-              </h1>
-            </div>
             <div className="settings-shell-actions">
               {saveMessage ? <span className="settings-save-feedback">{saveMessage}</span> : null}
             </div>
@@ -1495,39 +1629,90 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                       className="settings-input settings-mono-input"
                       value={modelDraft.model}
                       onChange={(event) => setModelDraft((prev) => ({ ...prev, model: event.target.value }))}
-                      placeholder="anthropic/claude-opus-4-5"
+                      placeholder={PROVIDER_MODEL_PLACEHOLDER[modelDraft.provider] || "anthropic/claude-opus-4-5"}
                     />
                   )}
                 </label>
-                <label className="settings-model-field settings-model-field-full">
-                  <span>API Base</span>
-                  <input
-                    type="text"
-                    className="settings-input settings-mono-input"
-                    value={modelDraft.apiBase}
-                    onChange={(event) => setModelDraft((prev) => ({ ...prev, apiBase: event.target.value }))}
-                    placeholder="留空则沿用 Provider 默认配置"
-                  />
-                </label>
-                <label className="settings-model-field settings-model-field-full">
-                  <span>API Key</span>
-                  <input
-                    type="password"
-                    className="settings-input settings-mono-input"
-                    value={modelDraft.apiKey}
-                    onChange={(event) => setModelDraft((prev) => ({ ...prev, apiKey: event.target.value }))}
-                    placeholder="留空则沿用 Provider 默认配置"
-                  />
-                </label>
-                <label className="settings-model-field settings-model-field-full">
-                  <span>Extra Headers (JSON)</span>
-                  <textarea
-                    className="settings-input settings-model-headers settings-mono-input"
-                    value={modelDraft.extraHeadersText}
-                    onChange={(event) => setModelDraft((prev) => ({ ...prev, extraHeadersText: event.target.value }))}
-                    spellCheck={false}
-                  />
-                </label>
+                {isOAuthProvider ? (
+                  <div className="settings-model-field settings-model-field-full">
+                    <span>认证方式</span>
+                    <div className="settings-empty-card">
+                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                        <div>
+                          当前 Provider 使用 OAuth 认证，不需要填写 API Key。请先在命令行执行
+                          <span className="settings-mono-text"> {oauthLoginCommand} </span>
+                          完成授权。
+                        </div>
+                        <div>
+                          当前状态：
+                          {oauthLoading ? " 正在检查..." : oauthStatus?.authorized ? " 已授权" : " 未授权"}
+                          {oauthStatus?.accountId ? ` · ${oauthStatus.accountId}` : ""}
+                        </div>
+                        {oauthStatus?.error ? <div>{oauthStatus.error}</div> : null}
+                        <div className="settings-section-actions">
+                          {modelDraft.provider === "gemini_oauth" ? (
+                            <button
+                              type="button"
+                              className="settings-secondary-btn"
+                              onClick={importOauthConfig}
+                              disabled={oauthLoading}
+                            >
+                              导入本地配置
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="settings-secondary-btn"
+                            onClick={refreshOauthStatus}
+                            disabled={oauthLoading}
+                          >
+                            检查是否已授权
+                          </button>
+                          <button
+                            type="button"
+                            className="settings-secondary-btn danger"
+                            onClick={revokeOauth}
+                            disabled={oauthLoading || !oauthStatus?.authorized}
+                          >
+                            去授权
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <label className="settings-model-field settings-model-field-full">
+                      <span>API Base</span>
+                      <input
+                        type="text"
+                        className="settings-input settings-mono-input"
+                        value={modelDraft.apiBase}
+                        onChange={(event) => setModelDraft((prev) => ({ ...prev, apiBase: event.target.value }))}
+                        placeholder="留空则沿用 Provider 默认配置"
+                      />
+                    </label>
+                    <label className="settings-model-field settings-model-field-full">
+                      <span>API Key</span>
+                      <input
+                        type="password"
+                        className="settings-input settings-mono-input"
+                        value={modelDraft.apiKey}
+                        onChange={(event) => setModelDraft((prev) => ({ ...prev, apiKey: event.target.value }))}
+                        placeholder="留空则沿用 Provider 默认配置"
+                      />
+                    </label>
+                    <label className="settings-model-field settings-model-field-full">
+                      <span>Extra Headers (JSON)</span>
+                      <textarea
+                        className="settings-input settings-model-headers settings-mono-input"
+                        value={modelDraft.extraHeadersText}
+                        onChange={(event) => setModelDraft((prev) => ({ ...prev, extraHeadersText: event.target.value }))}
+                        spellCheck={false}
+                      />
+                    </label>
+                  </>
+                )}
                 <label className="settings-model-field">
                   <span>Max Tokens</span>
                   <input
@@ -1583,6 +1768,92 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                       type="checkbox"
                       checked={modelDraft.enabled}
                       onChange={(event) => setModelDraft((prev) => ({ ...prev, enabled: event.target.checked }))}
+                    />
+                    <span />
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {mcpEditorOpen ? (
+        <div className="settings-dialog-backdrop" onClick={() => setMcpEditorOpen(false)}>
+          <div className="settings-dialog settings-model-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="settings-dialog-header">
+              <div className="settings-dialog-heading">
+                <p className="settings-shell-kicker">
+                  {mcpDraft.id.startsWith("mcp_") ? "新建 MCP 服务" : "编辑 MCP 服务"}
+                </p>
+                <h2 className="settings-dialog-title">
+                  {mcpDraft.name || "配置 MCP 服务"}
+                </h2>
+              </div>
+              <div className="settings-list-actions">
+                <button
+                  type="button"
+                  className="settings-icon-btn"
+                  onClick={saveMcp}
+                  title="保存"
+                  aria-label="保存"
+                >
+                  <SaveIcon />
+                </button>
+                <button
+                  type="button"
+                  className="settings-icon-btn"
+                  onClick={() => setMcpEditorOpen(false)}
+                  title="关闭"
+                  aria-label="关闭"
+                >
+                  <CloseIcon />
+                </button>
+              </div>
+            </div>
+            <div className="settings-dialog-body settings-model-body">
+              {mcpEditorError ? <div className="settings-empty-card">{mcpEditorError}</div> : null}
+              <div className="settings-model-grid">
+                <label className="settings-model-field">
+                  <span>名称</span>
+                  <input
+                    type="text"
+                    className="settings-input"
+                    value={mcpDraft.name}
+                    onChange={(e) => setMcpDraft({ ...mcpDraft, name: e.target.value })}
+                    placeholder="服务名称，如 Filesystem"
+                  />
+                </label>
+                <label className="settings-model-field">
+                  <span>通信协议</span>
+                  <div className="settings-select-wrap">
+                    <select
+                      className="settings-select"
+                      value={mcpDraft.transport}
+                      onChange={(e) => setMcpDraft({ ...mcpDraft, transport: e.target.value })}
+                    >
+                      <option value="stdio">stdio (本地命令)</option>
+                      <option value="streamableHttp">streamableHttp</option>
+                      <option value="websocket">websocket</option>
+                    </select>
+                  </div>
+                </label>
+                <label className="settings-model-field settings-model-field-full">
+                  <span>Endpoint / 指令</span>
+                  <input
+                    type="text"
+                    className="settings-input settings-mono-input"
+                    value={mcpDraft.endpoint}
+                    onChange={(e) => setMcpDraft({ ...mcpDraft, endpoint: e.target.value })}
+                    placeholder="npx @modelcontextprotocol/server-filesystem"
+                  />
+                </label>
+                <div className="settings-model-field settings-model-inline">
+                  <span>启用状态</span>
+                  <label className="settings-switch">
+                    <input
+                      type="checkbox"
+                      checked={mcpDraft.enabled}
+                      onChange={(e) => setMcpDraft({ ...mcpDraft, enabled: e.target.checked })}
                     />
                     <span />
                   </label>

@@ -1,9 +1,11 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, type MouseEvent } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import Sidebar from "@/components/Sidebar";
 import ChatMain from "@/components/ChatMain";
 import CronPage from "@/components/CronPage";
 import SettingsPage from "@/components/SettingsPage";
 import type { AppearanceSettings } from "@/components/SettingsPage";
+import { ArrowLeftIcon, ArrowRightIcon, BotFaceIcon, SidebarIcon } from "@/components/Icons";
 import { useChat } from "@/hooks/useChat";
 
 type ViewMode = "chat" | "cron" | "settings";
@@ -31,6 +33,7 @@ function App() {
   const [currentSessionKey, setCurrentSessionKey] = useState("desktop:direct");
   const [appearance, setAppearance] = useState<AppearanceSettings>(() => readAppearance());
   const [resolvedTheme, setResolvedTheme] = useState<"dark" | "light">("dark");
+  const [titlebarDragging, setTitlebarDragging] = useState(false);
   const [activeModelLabel, setActiveModelLabel] = useState("nanobot");
   const [activeProviderLabel, setActiveProviderLabel] = useState("");
   const [modelOptions, setModelOptions] = useState<Array<{ id: string; name: string; enabled: boolean; provider: string }>>([]);
@@ -51,17 +54,35 @@ function App() {
   });
 
   const toggleSidebar = () => setSidebarOpen((prev) => !prev);
+  const canToolbarBack = viewMode !== "chat" || sidebarOpen;
+  const canToolbarForward = viewMode === "chat" && !sidebarOpen;
+  const handleToolbarBack = useCallback(() => {
+    if (viewMode !== "chat") {
+      setViewMode("chat");
+      return;
+    }
+    if (sidebarOpen) {
+      setSidebarOpen(false);
+    }
+  }, [sidebarOpen, viewMode]);
+  const handleToolbarForward = useCallback(() => {
+    if (viewMode === "chat" && !sidebarOpen) {
+      setSidebarOpen(true);
+    }
+  }, [sidebarOpen, viewMode]);
 
   const handleNewChat = useCallback(() => {
     const key = `desktop:${Date.now()}`;
     setCurrentSessionKey(key);
     setCurrentSessionModelId(defaultModelId);
+    setViewMode("chat");
     chat.clearMessages();
   }, [chat, defaultModelId]);
 
   const handleSelectSession = useCallback(
     async (key: string) => {
       setCurrentSessionKey(key);
+      setViewMode("chat");
       const session = await chat.loadSession(key);
       setCurrentSessionModelId(session?.modelId || defaultModelId);
     },
@@ -190,8 +211,6 @@ function App() {
     }
   }, [currentSessionModelId, defaultModelId, modelOptions, providerLabels]);
 
-  const sessionModelDebugLabel = currentSessionKey ? `当前会话ID: ${currentSessionKey}` : "";
-
   const handleQuickSwitchModel = useCallback(
     async (modelId: string) => {
       if (!modelId || modelId === currentSessionModelId) return;
@@ -221,6 +240,23 @@ function App() {
     [currentSessionKey, currentSessionModelId, httpUrl, modelOptions]
   );
 
+  const handleTitlebarMouseDown = useCallback((event: MouseEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+    const target = event.target as HTMLElement | null;
+    if (!target) return;
+    if (target.closest("button, input, textarea, select, a, [role='button']")) return;
+    setTitlebarDragging(true);
+    void getCurrentWindow().startDragging();
+  }, []);
+
+  const handleTitlebarDoubleClick = useCallback((event: MouseEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+    const target = event.target as HTMLElement | null;
+    if (!target) return;
+    if (target.closest("button, input, textarea, select, a, [role='button']")) return;
+    void getCurrentWindow().toggleMaximize();
+  }, []);
+
   useEffect(() => {
     if (!modelSwitchFeedback) return;
     const timer = window.setTimeout(() => {
@@ -229,13 +265,61 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [modelSwitchFeedback]);
 
+  useEffect(() => {
+    if (!titlebarDragging) return;
+    const clearDragging = () => setTitlebarDragging(false);
+    window.addEventListener("mouseup", clearDragging);
+    window.addEventListener("blur", clearDragging);
+    return () => {
+      window.removeEventListener("mouseup", clearDragging);
+      window.removeEventListener("blur", clearDragging);
+    };
+  }, [titlebarDragging]);
+
   return (
     <div className={`app-container theme-${resolvedTheme}`}>
-      {viewMode === "chat" ? (
-        <>
+      <div className="app-frame">
+        <header
+          className={`window-titlebar ${titlebarDragging ? "is-dragging" : ""}`}
+          onMouseDown={handleTitlebarMouseDown}
+          onDoubleClick={handleTitlebarDoubleClick}
+        >
+          <div className="window-titlebar-left">
+            <div className="window-titlebar-traffic-space" />
+            <button className="window-titlebar-btn" onClick={toggleSidebar} title={sidebarOpen ? "收起侧栏" : "打开侧栏"}>
+              <SidebarIcon />
+            </button>
+            <div className="window-titlebar-divider" />
+            <button
+              className={`window-titlebar-btn ${canToolbarBack ? "" : "is-muted"}`}
+              type="button"
+              title={viewMode !== "chat" ? "返回聊天" : "收起侧栏"}
+              onClick={handleToolbarBack}
+              disabled={!canToolbarBack}
+            >
+              <ArrowLeftIcon />
+            </button>
+            <button
+              className={`window-titlebar-btn ${canToolbarForward ? "" : "is-muted"}`}
+              type="button"
+              title="展开侧栏"
+              onClick={handleToolbarForward}
+              disabled={!canToolbarForward}
+            >
+              <ArrowRightIcon />
+            </button>
+          </div>
+          <div className="window-titlebar-center" />
+          <div className="window-titlebar-right">
+            <button className="window-titlebar-btn" onClick={() => setViewMode("settings")} title="打开设置">
+              <BotFaceIcon />
+            </button>
+          </div>
+        </header>
+
+        <div className="app-body">
           <Sidebar
             isOpen={sidebarOpen}
-            onToggle={toggleSidebar}
             onNewChat={handleNewChat}
             onSelectSession={handleSelectSession}
             onDeleteSession={handleDeleteSession}
@@ -246,36 +330,33 @@ function App() {
             gatewayUrl={gatewayUrl}
             currentView={viewMode}
           />
-          <ChatMain
-            sidebarOpen={sidebarOpen}
-            onToggleSidebar={toggleSidebar}
-            onNewChat={handleNewChat}
-            sessionKey={currentSessionKey}
-            messages={chat.messages}
-            isLoading={chat.isLoading}
-            progress={chat.progress}
-            connected={chat.connected}
-            onSend={chat.send}
-            modelLabel={activeModelLabel}
-            providerLabel={activeProviderLabel}
-            modelOptions={modelOptions}
-            selectedModelId={currentSessionModelId || defaultModelId}
-            onSelectModel={handleQuickSwitchModel}
-            modelSwitching={switchingModel}
-            sessionModelDebugLabel={sessionModelDebugLabel}
-          />
-        </>
-      ) : viewMode === "cron" ? (
-        <CronPage gatewayUrl={gatewayUrl} onBack={() => setViewMode("chat")} />
-      ) : (
-        <SettingsPage
-          gatewayUrl={gatewayUrl}
-          onGatewayUrlChange={handleGatewayUrlChange}
-          onBack={() => setViewMode("chat")}
-          appearance={appearance}
-          onAppearanceChange={setAppearance}
-        />
-      )}
+          {viewMode === "chat" ? (
+            <ChatMain
+              sessionKey={currentSessionKey}
+              messages={chat.messages}
+              isLoading={chat.isLoading}
+              progress={chat.progress}
+              connected={chat.connected}
+              onSend={chat.send}
+              modelLabel={activeModelLabel}
+              providerLabel={activeProviderLabel}
+              modelOptions={modelOptions}
+              selectedModelId={currentSessionModelId || defaultModelId}
+              onSelectModel={handleQuickSwitchModel}
+              modelSwitching={switchingModel}
+            />
+          ) : viewMode === "cron" ? (
+            <CronPage gatewayUrl={gatewayUrl} />
+          ) : (
+            <SettingsPage
+              gatewayUrl={gatewayUrl}
+              onGatewayUrlChange={handleGatewayUrlChange}
+              appearance={appearance}
+              onAppearanceChange={setAppearance}
+            />
+          )}
+        </div>
+      </div>
     </div>
   );
 }

@@ -37,9 +37,11 @@ DESKTOP_SUPPORTED_PROVIDER_NAMES = {
     "openrouter",
     "anthropic",
     "openai",
+    "openai_codex",
     "github_copilot",
     "deepseek",
     "gemini",
+    "gemini_oauth",
     "zhipu",
     "minimax",
     "moonshot",
@@ -76,6 +78,9 @@ class GatewayAPI:
         app.router.add_get("/api/models", self._list_models)
         app.router.add_post("/api/models", self._create_model)
         app.router.add_post("/api/models/test", self._test_model)
+        app.router.add_get("/api/oauth/{provider}/status", self._get_oauth_status)
+        app.router.add_post("/api/oauth/{provider}/import", self._import_oauth_config)
+        app.router.add_delete("/api/oauth/{provider}", self._revoke_oauth)
         app.router.add_put("/api/models/{model_id}", self._update_model)
         app.router.add_delete("/api/models/{model_id}", self._delete_model)
         app.router.add_post("/api/models/{model_id}/select", self._select_model)
@@ -440,9 +445,13 @@ class GatewayAPI:
         }
 
     @staticmethod
-    def _provider_options() -> list[dict[str, str]]:
+    def _provider_options() -> list[dict[str, Any]]:
         return [
-            {"id": spec.name, "label": spec.label}
+            {
+                "id": spec.name,
+                "label": "OpenAI (OAuth)" if spec.name == "openai_codex" else spec.label,
+                "isOAuth": bool(spec.is_oauth),
+            }
             for spec in PROVIDERS
             if spec.name in DESKTOP_SUPPORTED_PROVIDER_NAMES
         ]
@@ -535,6 +544,95 @@ class GatewayAPI:
             "defaultModelId": self.config.agents.defaults.model_id or active.id,
             "providers": self._provider_options(),
         })
+
+    async def _get_oauth_status(self, request: web.Request) -> web.Response:
+        provider = request.match_info["provider"].replace("-", "_")
+        if provider == "openai_codex":
+            try:
+                from oauth_cli_kit import get_token
+
+                token = await asyncio.to_thread(get_token)
+                return web.json_response({
+                    "provider": provider,
+                    "authorized": True,
+                    "accountId": getattr(token, "account_id", None),
+                })
+            except Exception as e:
+                return web.json_response({
+                    "provider": provider,
+                    "authorized": False,
+                    "error": str(e),
+                })
+        if provider == "gemini_oauth":
+            from nanobot.providers.gemini_oauth_provider import get_adc_status
+
+            status = await asyncio.to_thread(get_adc_status)
+            return web.json_response({
+                "provider": provider,
+                **status,
+            })
+        return web.json_response({"error": "Unsupported OAuth provider"}, status=404)
+
+    async def _revoke_oauth(self, request: web.Request) -> web.Response:
+        provider = request.match_info["provider"].replace("-", "_")
+        try:
+            removed: list[str] = []
+            if provider == "openai_codex":
+                from oauth_cli_kit.providers import OPENAI_CODEX_PROVIDER
+                from oauth_cli_kit.storage import FileTokenStorage
+
+                storage = FileTokenStorage(token_filename=OPENAI_CODEX_PROVIDER.token_filename)
+                token_path = storage.get_token_path()
+                if token_path.exists():
+                    token_path.unlink()
+                    removed.append(str(token_path))
+                lock_path = token_path.with_suffix(".lock")
+                if lock_path.exists():
+                    lock_path.unlink()
+                    removed.append(str(lock_path))
+
+                codex_cli_path = Path.home() / ".codex" / "auth.json"
+                if codex_cli_path.exists():
+                    codex_cli_path.unlink()
+                    removed.append(str(codex_cli_path))
+            elif provider == "gemini_oauth":
+                from nanobot.providers.gemini_oauth_provider import revoke_adc
+
+                removed = await asyncio.to_thread(revoke_adc)
+            else:
+                return web.json_response({"error": "Unsupported OAuth provider"}, status=404)
+
+            return web.json_response({
+                "ok": True,
+                "provider": provider,
+                "removed": removed,
+            })
+        except Exception as e:
+            logger.error("Failed to revoke OAuth for {}: {}", provider, e)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _import_oauth_config(self, request: web.Request) -> web.Response:
+        provider = request.match_info["provider"].replace("-", "_")
+        try:
+            body = await request.json()
+            source_path = str(body.get("path") or "").strip()
+            if not source_path:
+                return web.json_response({"error": "Missing path"}, status=400)
+            if provider == "gemini_oauth":
+                from nanobot.providers.gemini_oauth_provider import import_adc_config, get_adc_status
+
+                saved_path = await asyncio.to_thread(import_adc_config, source_path)
+                status = await asyncio.to_thread(get_adc_status)
+                return web.json_response({
+                    "ok": True,
+                    "provider": provider,
+                    "path": saved_path,
+                    **status,
+                })
+            return web.json_response({"error": "Unsupported OAuth provider"}, status=404)
+        except Exception as e:
+            logger.error("Failed to import OAuth config for {}: {}", provider, e)
+            return web.json_response({"error": str(e)}, status=500)
 
     async def _create_model(self, request: web.Request) -> web.Response:
         try:

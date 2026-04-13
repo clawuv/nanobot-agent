@@ -1,9 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { ArrowLeftIcon, CloseIcon, ClockIcon, EditIcon, PlusIcon, RefreshIcon, SaveIcon, TrashIcon } from "./Icons";
+import { CloseIcon, ClockIcon, EditIcon, PlusIcon, RefreshIcon, SaveIcon, TrashIcon } from "./Icons";
 
 interface CronPageProps {
   gatewayUrl: string;
-  onBack: () => void;
 }
 
 interface CronServiceStatus {
@@ -192,7 +191,7 @@ const normalizeFetchError = (error: unknown) => {
   return text || "请求失败";
 };
 
-const CronPage: React.FC<CronPageProps> = ({ gatewayUrl, onBack }) => {
+const CronPage: React.FC<CronPageProps> = ({ gatewayUrl }) => {
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [status, setStatus] = useState<CronServiceStatus | null>(null);
   const [loading, setLoading] = useState(false);
@@ -390,10 +389,6 @@ const CronPage: React.FC<CronPageProps> = ({ gatewayUrl, onBack }) => {
     <main className="cron-page">
       <div className="cron-page-header">
         <div>
-          <button className="cron-back-btn" type="button" onClick={onBack}>
-            <ArrowLeftIcon />
-            <span>返回聊天</span>
-          </button>
           <h1 className="cron-page-title">任务调度中心</h1>
           <p className="cron-page-subtitle">接入 nanobot 的真实 cron 服务，支持创建、编辑、启停、立即执行与删除。</p>
         </div>

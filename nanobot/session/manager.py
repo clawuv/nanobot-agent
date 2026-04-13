@@ -1,6 +1,7 @@
 """Session management for conversation history."""
 
 import json
+import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -237,20 +238,61 @@ class SessionManager:
 
         for path in self.sessions_dir.glob("*.jsonl"):
             try:
-                # Read just the metadata line
+                # Read metadata plus the first user message so the UI can show a useful title.
                 with open(path, encoding="utf-8") as f:
                     first_line = f.readline().strip()
-                    if first_line:
-                        data = json.loads(first_line)
-                        if data.get("_type") == "metadata":
-                            key = data.get("key") or path.stem.replace("_", ":", 1)
-                            sessions.append({
-                                "key": key,
-                                "created_at": data.get("created_at"),
-                                "updated_at": data.get("updated_at"),
-                                "path": str(path)
-                            })
+                    if not first_line:
+                        continue
+                    data = json.loads(first_line)
+                    if data.get("_type") != "metadata":
+                        continue
+
+                    title = ""
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        item = json.loads(line)
+                        if item.get("role") != "user":
+                            continue
+                        title = self._extract_session_title(item.get("content"))
+                        if title:
+                            break
+
+                    key = data.get("key") or path.stem.replace("_", ":", 1)
+                    sessions.append({
+                        "key": key,
+                        "created_at": data.get("created_at"),
+                        "updated_at": data.get("updated_at"),
+                        "path": str(path),
+                        "title": title,
+                    })
             except Exception:
                 continue
 
         return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)
+
+    @staticmethod
+    def _extract_session_title(content: Any) -> str:
+        text_parts: list[str] = []
+
+        def consume_text(text: str) -> None:
+            if not text:
+                return
+            cleaned = re.sub(r"\[image:\s*[^\]]+\]", "", text)
+            cleaned = re.sub(r"\[(?:file|attachment):\s*[^\]]+\]", "", cleaned)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            if cleaned:
+                text_parts.append(cleaned)
+
+        if isinstance(content, str):
+            consume_text(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                    consume_text(block["text"])
+
+        title = " ".join(text_parts).strip()
+        if not title:
+            return ""
+        return title[:40]

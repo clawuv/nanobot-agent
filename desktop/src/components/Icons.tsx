@@ -138,6 +138,24 @@ export const ArrowLeftIcon: React.FC<{ className?: string }> = ({ className }) =
   </svg>
 );
 
+export const ArrowRightIcon: React.FC<{ className?: string }> = ({ className }) => (
+  <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="m9 18 6-6-6-6" />
+    <path d="M15 12H5" />
+  </svg>
+);
+
+export const BotFaceIcon: React.FC<{ className?: string }> = ({ className }) => (
+  <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 3v3" />
+    <path d="M8 5h8" />
+    <rect x="4" y="7" width="16" height="14" rx="7" />
+    <circle cx="9" cy="13" r="1" fill="currentColor" stroke="none" />
+    <circle cx="15" cy="13" r="1" fill="currentColor" stroke="none" />
+    <path d="M8.5 17c1.2-1 5.8-1 7 0" />
+  </svg>
+);
+
 export const PaletteIcon: React.FC<{ className?: string }> = ({ className }) => (
   <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M12 22a10 10 0 1 1 10-10c0 1.7-1.3 3-3 3h-1.4a1.6 1.6 0 0 0-1.6 1.6c0 .4.2.8.4 1.1.4.5.6 1 .6 1.6 0 1.1-.9 2-2 2Z" />
@@ -195,6 +213,22 @@ export const ClockIcon: React.FC<{ className?: string }> = ({ className }) => (
   </svg>
 );
 
+export const BoxIcon: React.FC<{ className?: string }> = ({ className }) => (
+  <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z" />
+    <path d="m3.3 7 8.7 5 8.7-5" />
+    <path d="M12 22V12" />
+  </svg>
+);
+
+export const MoreHorizontalIcon: React.FC<{ className?: string }> = ({ className }) => (
+  <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+    <circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" />
+  </svg>
+);
+
 export const CloseIcon: React.FC<{ className?: string }> = ({ className }) => (
   <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M18 6 6 18" />
@@ -207,6 +241,27 @@ export const SaveIcon: React.FC<{ className?: string }> = ({ className }) => (
     <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z" />
     <path d="M17 21v-8H7v8" />
     <path d="M7 3v5h8" />
+  </svg>
+);
+
+export const DownloadIcon: React.FC<{ className?: string }> = ({ className }) => (
+  <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 3v10" />
+    <path d="m8 9 4 4 4-4" />
+    <path d="M4 17v1a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1" />
+  </svg>
+);
+
+export const CopyIcon: React.FC<{ className?: string }> = ({ className }) => (
+  <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="9" width="11" height="11" rx="2" />
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+  </svg>
+);
+
+export const CheckIcon: React.FC<{ className?: string }> = ({ className }) => (
+  <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+    <path d="m5 12 4.5 4.5L19 7" />
   </svg>
 );
 

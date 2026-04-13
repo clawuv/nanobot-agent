@@ -2,21 +2,15 @@ import React, { useState, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  CloseIcon,
+  ProjectIcon,
   PlusIcon,
   SendIcon,
-  SidebarIcon,
-  RefreshIcon,
-  CloseIcon,
-  GPTIcon,
-  ProjectIcon,
 } from "./Icons";
 import MessageBubble from "./MessageBubble";
 import type { ChatMessage } from "../hooks/useChat";
 
 interface ChatMainProps {
-  sidebarOpen: boolean;
-  onToggleSidebar: () => void;
-  onNewChat: () => void;
   sessionKey: string;
   messages: ChatMessage[];
   isLoading: boolean;
@@ -29,7 +23,6 @@ interface ChatMainProps {
   selectedModelId?: string;
   onSelectModel?: (modelId: string) => void;
   modelSwitching?: boolean;
-  sessionModelDebugLabel?: string;
 }
 
 interface PendingImage {
@@ -66,6 +59,35 @@ const emptyDraft = (): ComposerDraft => ({
 const MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024;
 const SUPPORTED_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp"]);
 
+const getMessageDayKey = (timestamp?: string): string => {
+  if (!timestamp) return "";
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+};
+
+const formatMessageDayLabel = (timestamp?: string): string => {
+  if (!timestamp) return "";
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "";
+
+  const now = new Date();
+  const todayKey = getMessageDayKey(now.toISOString());
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  const yesterdayKey = getMessageDayKey(yesterday.toISOString());
+  const dayKey = getMessageDayKey(timestamp);
+
+  if (dayKey === todayKey) return "今天";
+  if (dayKey === yesterdayKey) return "昨天";
+
+  return date.toLocaleDateString("zh-CN", {
+    month: "long",
+    day: "numeric",
+    weekday: "short",
+  });
+};
+
 const normalizeLocalPath = (rawPath: string): string => {
   if (!rawPath) return "";
   try {
@@ -80,9 +102,6 @@ const normalizeLocalPath = (rawPath: string): string => {
 };
 
 const ChatMain: React.FC<ChatMainProps> = ({
-  sidebarOpen,
-  onToggleSidebar,
-  onNewChat,
   sessionKey,
   messages,
   isLoading,
@@ -95,7 +114,6 @@ const ChatMain: React.FC<ChatMainProps> = ({
   selectedModelId,
   onSelectModel,
   modelSwitching,
-  sessionModelDebugLabel,
 }) => {
   const [drafts, setDrafts] = useState<Record<string, ComposerDraft>>({});
   const [dragOver, setDragOver] = useState(false);
@@ -385,36 +403,28 @@ const ChatMain: React.FC<ChatMainProps> = ({
 
   const hasMessages = messages.length > 0;
   const canSend = (!!inputValue.trim() || pendingImages.length > 0) && !isLoading;
+  const messageItems = messages.flatMap((msg, index) => {
+    const hasRenderableContent = msg.content || (msg.images?.length || 0) > 0 || (msg.attachments?.length || 0) > 0;
+    if (!hasRenderableContent) return [];
+
+    const currentDayKey = getMessageDayKey(msg.timestamp);
+    const previousDayKey = index > 0 ? getMessageDayKey(messages[index - 1]?.timestamp) : "";
+    const items: React.ReactNode[] = [];
+
+    if (currentDayKey && currentDayKey !== previousDayKey) {
+      items.push(
+        <div key={`day-${msg.id}`} className="chat-date-divider" aria-label={formatMessageDayLabel(msg.timestamp)}>
+          <span className="chat-date-divider-label">{formatMessageDayLabel(msg.timestamp)}</span>
+        </div>
+      );
+    }
+
+    items.push(<MessageBubble key={msg.id} message={msg} onPreviewImage={setPreviewImage} />);
+    return items;
+  });
 
   return (
     <div className="chat-main">
-      {/* Top bar */}
-      <header className="chat-header">
-        <div className="chat-header-left">
-          {!sidebarOpen && (
-            <button className="header-icon-btn" onClick={onToggleSidebar} title="打开侧栏">
-              <SidebarIcon />
-            </button>
-          )}
-          <div className="chat-model-selector">
-            <span className="chat-model-name">
-              <GPTIcon className="chat-model-icon" />
-              <span>{modelLabel || "nanobot"}</span>
-            </span>
-            {sessionModelDebugLabel ? (
-              <div className="chat-model-debug" title={sessionModelDebugLabel}>
-                {sessionModelDebugLabel}
-              </div>
-            ) : null}
-          </div>
-        </div>
-        <div className="chat-header-right">
-          <button className="header-icon-btn" onClick={onNewChat} title="新聊天">
-            <RefreshIcon />
-          </button>
-        </div>
-      </header>
-
       {/* Messages / Welcome */}
       <div className="chat-content">
         {!hasMessages ? (
@@ -427,18 +437,11 @@ const ChatMain: React.FC<ChatMainProps> = ({
           </div>
         ) : (
           <div className="chat-messages">
-            {messages.map((msg) => (
-              (msg.content || (msg.images?.length || 0) > 0 || (msg.attachments?.length || 0) > 0) ? (
-                <MessageBubble key={msg.id} message={msg} onPreviewImage={setPreviewImage} />
-              ) : null
-            ))}
+            {messageItems}
 
             {/* Loading / Progress */}
             {isLoading && (
               <div className="message-row message-assistant">
-                <div className="message-avatar">
-                  <span className="message-avatar-text">🐈</span>
-                </div>
                 <div className="message-bubble bubble-assistant">
                   {progress ? (
                     <p className="message-progress">{progress}</p>

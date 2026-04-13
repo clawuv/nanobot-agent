@@ -92,6 +92,7 @@ def make_provider(config: Config):
     """Create a provider instance for the active model profile."""
     from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
     from nanobot.providers.base import GenerationSettings
+    from nanobot.providers.gemini_oauth_provider import GeminiOAuthProvider
     from nanobot.providers.openai_codex_provider import OpenAICodexProvider
     from nanobot.providers.registry import find_by_name
 
@@ -102,6 +103,11 @@ def make_provider(config: Config):
 
     if provider_name == "openai_codex" or profile.model.startswith("openai-codex/"):
         provider = OpenAICodexProvider(default_model=profile.model)
+    elif provider_name == "gemini_oauth" or profile.model.startswith("gemini-oauth/"):
+        provider = GeminiOAuthProvider(
+            default_model=profile.model,
+            api_base=runtime.api_base,
+        )
     elif provider_name == "custom":
         from nanobot.providers.custom_provider import CustomProvider
 
